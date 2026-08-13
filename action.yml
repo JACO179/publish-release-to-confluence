@@ -625,3 +625,34 @@ runs:
           exit 1
         fi
         echo "README published."
+
+        # Same reasoning as the release page, and a sharper case for it: this
+        # page's body is replaced on every release, so an edit made here is lost
+        # at the next publish regardless. Better to refuse the edit than to
+        # accept it and silently discard it later.
+        if [ "${{ inputs.restrictUpdates }}" == "true" ]; then
+          accountId=$(curl --silent --show-error --fail \
+              --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/user/current" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'Accept: application/json' | jq -r '.accountId')
+          if [ -z "$accountId" ] || [ "$accountId" == "null" ]; then
+            echo "Could not determine the publishing account for restrictions." >&2
+            exit 1
+          fi
+          restrictions=$(jq -n --arg id "$accountId" \
+            '[{operation: "update",
+               restrictions: {user: [{type: "known", accountId: $id}], group: []}}]')
+          code=$(curl --silent --show-error --output /tmp/restrict-readme.json \
+              --write-out '%{http_code}' --request PUT \
+              --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${PAGE_ID}/restriction" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --data "$restrictions")
+          if [ "$code" != "200" ]; then
+            echo "Failed to restrict editing of the README page: HTTP ${code}" >&2
+            cat /tmp/restrict-readme.json >&2
+            exit 1
+          fi
+          echo "Editing restricted to the publishing account; reading unchanged."
+        fi
