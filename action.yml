@@ -71,8 +71,8 @@ inputs:
     type: string
   githubToken:
     description: >-
-      Token used to download the release assets and read the README. Required
-      when attachAssets is true or readmePageId is set, and it must be able to
+      Token used to download the release assets and read the documents. Required
+      when attachAssets is true or docsParentId is set, and it must be able to
       read the repository — for a private one the workflow's own github.token is
       the usual answer. (Written without expression braces deliberately: GitHub
       evaluates them even inside a description, where no context exists yet, and
@@ -98,20 +98,25 @@ inputs:
     required: false
     default: "SHA256SUMS"
     type: string
-  # README mirroring
-  readmePageId:
+  # Documentation mirroring
+  docsParentId:
     description: >-
-      Page whose body is replaced with the repository README at this tag. Left
-      empty, the README is not published at all.
+      Parent page under which the repository's Markdown documents are published,
+      one child page per file, named after the file. Left empty, no documentation
+      is published.
 
-      The whole body is replaced, so point this at a page that exists only for
-      the README — not at a landing page carrying hand-written content, which
-      would be overwritten on every release.
+      Each child page's body is replaced on every release, so those pages must
+      exist only for this. The parent itself is never written to, so it is free
+      to carry an index or anything else by hand.
     required: false
     default: ""
     type: string
-  readmePath:
-    description: Path to the README within the repository.
+  docsPaths:
+    description: >-
+      Comma-separated globs selecting which Markdown files to publish, e.g.
+      "README.md,docs/*.md". A `*` does not cross a directory separator, so
+      docs/*.md takes docs/frontend.md and leaves docs/agents/domain.md alone;
+      use docs/**/*.md to reach into subdirectories.
     required: false
     default: "README.md"
     type: string
@@ -444,41 +449,34 @@ runs:
 
     # Mirrors the repository README onto a page, so the documentation a reader
     # sees in Confluence is the documentation that shipped with the release.
-    - name: Publish README to Confluence
-      if: inputs.readmePageId != ''
+    # Mirrors the repository's Markdown documents onto Confluence, one child
+    # page per file under a parent this action never writes to. A colleague with
+    # no repository access gets the documentation that shipped with the release,
+    # not whatever the default branch has drifted to since.
+    - name: Publish documentation to Confluence
+      if: inputs.docsParentId != ''
       shell: bash
       env:
-        PAGE_ID: ${{ inputs.readmePageId }}
-        README_PATH: ${{ inputs.readmePath }}
+        DOCS_PARENT_ID: ${{ inputs.docsParentId }}
+        DOCS_PATHS: ${{ inputs.docsPaths }}
+        SPACE_ID: ${{ inputs.spaceId }}
         TAG: ${{ inputs.tag }}
         REPO: ${{ inputs.repoOwner }}/${{ inputs.repoName }}
         GH_TOKEN: ${{ inputs.githubToken }}
+        RESTRICT: ${{ inputs.restrictUpdates }}
         CONFLUENCE_BASE_URL: ${{ inputs.ConfluenceBaseUrl }}
         CONFLUENCE_EMAIL: ${{ inputs.confluence_email }}
         CONFLUENCE_API_TOKEN: ${{ inputs.confluence_api_token }}
       run: |
         if [ -z "${GH_TOKEN}" ]; then
-          echo "readmePageId is set but githubToken is empty — pass \${{ github.token }}." >&2
+          echo "docsParentId is set but githubToken is empty — pass github.token." >&2
           exit 1
         fi
 
-        # The README as of this tag, not as of the default branch: the page
-        # should describe the release it is published beside.
-        gh api "repos/${REPO}/contents/${README_PATH}?ref=${TAG}" \
-          --jq '.content' | base64 -d > /tmp/readme.md
-
-        # GitHub renders its own flavour of Markdown better than anything we
-        # could reimplement here — tables, fenced code and reference links all
-        # come back correct.
-        jq -n --rawfile text /tmp/readme.md --arg ctx "${REPO}" \
-          '{text: $text, mode: "gfm", context: $ctx}' > /tmp/md-request.json
-        gh api --method POST /markdown --input /tmp/md-request.json > /tmp/readme.html
-
-        # The HTML is passed by path, not on stdin: `python3 -` takes the program
-        # from stdin, so the heredoc below already owns it and sys.stdin.read()
-        # would come back empty — which it silently did, publishing a page that
-        # held nothing but the banner.
-        python3 - "${TAG}" "${REPO}" /tmp/readme.html > /tmp/storage.html <<'PYTHON'
+        # The sanitizer is written to a file rather than piped in: `python3 -`
+        # reads its program from stdin, so a heredoc there leaves sys.stdin
+        # empty — which once published a page containing only its banner.
+        cat > /tmp/to_storage.py <<'PYTHON'
         import html, re, sys
         from html.parser import HTMLParser
         from urllib.parse import urljoin
@@ -490,9 +488,9 @@ runs:
                 "blockquote", "table", "thead", "tbody", "tr", "th", "td",
                 "a", "del", "sup", "sub"}
         VOID = {"br", "hr"}
-        # Images go entirely. The README's status badges are served from
-        # endpoints that require repository access, so to the audience this page
-        # exists for they would render as broken images.
+        # Images go entirely. Status badges are served from endpoints that
+        # require repository access, so to the audience these pages exist for
+        # they would render as broken images.
         DROP = {"img", "svg", "path", "script", "style", "picture", "source",
                 "iframe", "input", "button"}
 
@@ -514,21 +512,15 @@ runs:
                     self.out.append("<%s/>" % tag)
                     return
                 if tag not in KEEP:
-                    self.stack.append((tag, False))      # unwrap, keep contents
+                    self.stack.append((tag, False))
                     return
                 if tag == "a":
                     href = dict(attrs).get("href", "")
-                    # Anchors are dropped, links kept. GitHub wraps every heading
-                    # in a self-link to "#anchor", and in-page anchors written by
-                    # hand do not survive either: Confluence derives its own
-                    # heading ids, so "#requirements" would land nowhere.
+                    # Confluence derives its own heading ids, so an in-page
+                    # anchor written for GitHub would land nowhere.
                     if not href or href.startswith("#"):
                         self.stack.append((tag, False))
                         return
-                    # A relative link is relative to the repository, not to
-                    # Confluence. Left alone it resolves against the wiki host
-                    # and 404s there; made absolute it at least reaches the file
-                    # it names, for a reader who has repository access.
                     if not re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", href) \
                             and not href.startswith("//"):
                         href = urljoin(BLOB_BASE, href)
@@ -555,11 +547,12 @@ runs:
                 if not self.dropping:
                     self.out.append(html.escape(data, quote=False))
 
-        tag, repo, source = sys.argv[1], sys.argv[2], sys.argv[3]
+        tag, repo, source, doc_path = sys.argv[1:5]
         BLOB_BASE = "https://github.com/%s/blob/%s/" % (repo, tag)
         rendered = open(source, encoding="utf-8").read()
         if not rendered.strip():
-            sys.exit("rendered README is empty — nothing to publish")
+            sys.exit("rendered %s is empty — nothing to publish" % doc_path)
+
         parser = ToStorage()
         parser.feed(rendered)
         parser.close()
@@ -573,86 +566,146 @@ runs:
         body = re.sub(r'<a href="[^"]*"\s*></a>', "", body)
         body = re.sub(r"(?:<br/>\s*){2,}", "<br/>", body)
         body = re.sub(r"<p>(?:\s|<br/>)*</p>", "", body)
-
-        # A banner with nothing under it is a published page that looks fine and
-        # says nothing. Refuse rather than overwrite a page with an empty one.
         if not body.strip():
-            sys.exit("sanitized README body is empty — refusing to publish a banner alone")
+            sys.exit("sanitized %s is empty — refusing to publish a banner alone" % doc_path)
 
         banner = (
-            "<p><strong>Published automatically from the %s README at %s.</strong> "
-            "Edits made here are overwritten by the next release.</p><hr/>"
-            % (html.escape(repo), html.escape(tag))
+            '<p><strong>Published automatically from %s in %s at %s.</strong> '
+            'Edits made here are overwritten by the next release.</p><hr/>'
+            % (html.escape(doc_path), html.escape(repo), html.escape(tag))
         )
         sys.stdout.write(banner + body)
         PYTHON
 
-        # A page update must state the version it supersedes, so read it first.
-        page=$(curl --silent --show-error --fail \
-            --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${PAGE_ID}" \
-            --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-            --header 'Accept: application/json')
-        title=$(echo "$page" | jq -r '.title')
-        version=$(echo "$page" | jq -r '.version.number')
-        next=$((version + 1))
-        echo "Updating '${title}' (page ${PAGE_ID}) from version ${version} to ${next}"
+        # Which files to publish. A `*` must not cross a directory separator —
+        # docs/*.md means the documents in docs/, not everything beneath it — and
+        # patterns anchor at the repository root, so README.md cannot also pick
+        # up docs/README.md. fnmatch gives neither, hence the explicit translation.
+        gh api "repos/${REPO}/git/trees/${TAG}?recursive=1" \
+          --jq '.tree[] | select(.type == "blob") | .path' > /tmp/tree.txt
 
-        payload=$(jq -n \
-          --arg id "${PAGE_ID}" \
-          --arg title "${title}" \
-          --arg value "$(cat /tmp/storage.html)" \
-          --argjson version "${next}" \
-          '{
-             id: $id,
-             status: "current",
-             title: $title,
-             body: { representation: "storage", value: $value },
-             version: { number: $version, message: "Published from the repository README" }
-           }')
+        cat > /tmp/select_docs.py <<'PYTHON'
+        import re, sys
 
-        code=$(curl --silent --show-error --output /tmp/readme-response.json \
-            --write-out '%{http_code}' \
-            --request PUT \
-            --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${PAGE_ID}" \
-            --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-            --header 'Accept: application/json' \
-            --header 'Content-Type: application/json' \
-            --data "$payload")
-        if [ "$code" != "200" ]; then
-          echo "Failed to update the README page: HTTP ${code}" >&2
-          jq -r '.errors[]?.title // .message // .' /tmp/readme-response.json >&2 \
-            || cat /tmp/readme-response.json >&2
+        def to_regex(pattern):
+            out, i = "", 0
+            while i < len(pattern):
+                c = pattern[i]
+                if pattern.startswith("**/", i):
+                    out += "(?:.*/)?"; i += 3
+                elif c == "*":
+                    out += "[^/]*"; i += 1
+                elif c == "?":
+                    out += "[^/]"; i += 1
+                else:
+                    out += re.escape(c); i += 1
+            return re.compile("^" + out + "$")
+
+        patterns = [to_regex(p.strip()) for p in sys.argv[1].split(",") if p.strip()]
+        seen = []
+        for line in open(sys.argv[2], encoding="utf-8").read().splitlines():
+            if any(p.match(line) for p in patterns) and line not in seen:
+                seen.append(line)
+        print("\n".join(seen))
+        PYTHON
+
+        python3 /tmp/select_docs.py "${DOCS_PATHS}" /tmp/tree.txt > /tmp/selected.txt
+
+        if [ ! -s /tmp/selected.txt ]; then
+          echo "No files in ${TAG} matched '${DOCS_PATHS}'." >&2
           exit 1
         fi
-        echo "README published."
+        echo "Publishing under page ${DOCS_PARENT_ID}:"
+        sed 's/^/  /' /tmp/selected.txt
 
-        # Same reasoning as the release page, and a sharper case for it: this
-        # page's body is replaced on every release, so an edit made here is lost
-        # at the next publish regardless. Better to refuse the edit than to
-        # accept it and silently discard it later.
-        if [ "${{ inputs.restrictUpdates }}" == "true" ]; then
-          accountId=$(curl --silent --show-error --fail \
-              --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/user/current" \
+        while IFS= read -r doc; do
+          [ -n "$doc" ] || continue
+          title=$(basename "$doc" .md)
+          echo "--- ${doc} -> '${title}'"
+
+          gh api "repos/${REPO}/contents/${doc}?ref=${TAG}" --jq '.content' \
+            | base64 -d > /tmp/doc.md
+          jq -n --rawfile text /tmp/doc.md --arg ctx "${REPO}" \
+            '{text: $text, mode: "gfm", context: $ctx}' > /tmp/doc-request.json
+          gh api --method POST /markdown --input /tmp/doc-request.json > /tmp/doc.html
+          python3 /tmp/to_storage.py "${TAG}" "${REPO}" /tmp/doc.html "${doc}" > /tmp/doc-storage.html
+
+          encoded=$(printf '%s' "$title" | jq -sRr @uri)
+          found=$(curl --silent --show-error \
+              --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/spaces/${SPACE_ID}/pages?title=${encoded}" \
               --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-              --header 'Accept: application/json' | jq -r '.accountId')
-          if [ -z "$accountId" ] || [ "$accountId" == "null" ]; then
-            echo "Could not determine the publishing account for restrictions." >&2
+              --header 'Accept: application/json')
+          pageId=$(printf '%s' "$found" | jq -r '.results[0].id // ""')
+          foundParent=$(printf '%s' "$found" | jq -r '.results[0].parentId // ""')
+
+          if [ -n "$pageId" ] && [ "$foundParent" != "${DOCS_PARENT_ID}" ]; then
+            # Titles are unique per space, so a generic name like "architecture"
+            # can already belong to somebody else. Overwriting that page would be
+            # the worst possible outcome, so stop and say so.
+            echo "  a page titled '${title}' exists at ${pageId} under parent ${foundParent}," >&2
+            echo "  which is not ${DOCS_PARENT_ID}. Rename one of them; refusing to overwrite." >&2
             exit 1
           fi
-          restrictions=$(jq -n --arg id "$accountId" \
-            '[{operation: "update",
-               restrictions: {user: [{type: "known", accountId: $id}], group: []}}]')
-          code=$(curl --silent --show-error --output /tmp/restrict-readme.json \
-              --write-out '%{http_code}' --request PUT \
-              --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${PAGE_ID}/restriction" \
-              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-              --header 'Accept: application/json' \
-              --header 'Content-Type: application/json' \
-              --data "$restrictions")
-          if [ "$code" != "200" ]; then
-            echo "Failed to restrict editing of the README page: HTTP ${code}" >&2
-            cat /tmp/restrict-readme.json >&2
+
+          if [ -n "$pageId" ]; then
+            version=$(curl --silent --show-error \
+                --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
+                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                --header 'Accept: application/json' | jq -r '.version.number')
+            payload=$(jq -n --arg id "$pageId" --arg title "$title" \
+              --rawfile value /tmp/doc-storage.html --argjson version "$((version + 1))" \
+              '{id: $id, status: "current", title: $title,
+                body: {representation: "storage", value: $value},
+                version: {number: $version, message: "Published from the repository"}}')
+            code=$(curl --silent --show-error --output /tmp/doc-response.json \
+                --write-out '%{http_code}' --request PUT \
+                --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
+                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                --header 'Accept: application/json' --header 'Content-Type: application/json' \
+                --data "$payload")
+            action="updated to version $((version + 1))"
+          else
+            payload=$(jq -n --arg spaceId "${SPACE_ID}" --arg title "$title" \
+              --arg parentId "${DOCS_PARENT_ID}" --rawfile value /tmp/doc-storage.html \
+              '{spaceId: $spaceId, status: "current", title: $title, parentId: $parentId,
+                body: {representation: "storage", value: $value}}')
+            code=$(curl --silent --show-error --output /tmp/doc-response.json \
+                --write-out '%{http_code}' --request POST \
+                --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages" \
+                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                --header 'Accept: application/json' --header 'Content-Type: application/json' \
+                --data "$payload")
+            pageId=$(jq -r '.id // ""' /tmp/doc-response.json)
+            action="created as page ${pageId}"
+          fi
+
+          if [ "$code" != "200" ] || [ -z "$pageId" ]; then
+            echo "  failed: HTTP ${code}" >&2
+            jq -r '.errors[]?.title // .message // .' /tmp/doc-response.json >&2 \
+              || cat /tmp/doc-response.json >&2
             exit 1
           fi
-          echo "Editing restricted to the publishing account; reading unchanged."
-        fi
+          echo "  ${action}"
+
+          if [ "${RESTRICT}" == "true" ]; then
+            accountId=$(curl --silent --show-error --fail \
+                --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/user/current" \
+                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                --header 'Accept: application/json' | jq -r '.accountId')
+            restrictions=$(jq -n --arg id "$accountId" \
+              '[{operation: "update",
+                 restrictions: {user: [{type: "known", accountId: $id}], group: []}}]')
+            rcode=$(curl --silent --show-error --output /tmp/doc-restrict.json \
+                --write-out '%{http_code}' --request PUT \
+                --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${pageId}/restriction" \
+                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                --header 'Accept: application/json' --header 'Content-Type: application/json' \
+                --data "$restrictions")
+            if [ "$rcode" != "200" ]; then
+              echo "  failed to restrict editing: HTTP ${rcode}" >&2
+              cat /tmp/doc-restrict.json >&2
+              exit 1
+            fi
+            echo "  editing restricted; reading unchanged"
+          fi
+        done < /tmp/selected.txt
