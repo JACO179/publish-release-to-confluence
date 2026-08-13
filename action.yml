@@ -180,6 +180,50 @@ runs:
             --data "$payload")
         echo "Response: $response"
         pageId=$(echo "$response" | jq -r '.id')
+
+        # Confluence rejects a duplicate title within a space, so a second run
+        # for the same tag cannot create the page again. Failing there would
+        # make a re-run impossible exactly when it is most wanted: after a run
+        # that created the page and then failed part-way through attaching to
+        # it. Adopt the existing page and refresh its body instead.
+        if [ "$pageId" == "null" ] \
+           && echo "$response" | grep -q "same TITLE in this space"; then
+          title="Release: ${{ inputs.tag }}"
+          echo "A page titled '${title}' already exists — updating it instead."
+          encoded=$(printf '%s' "$title" | jq -sRr @uri)
+          pageId=$(curl --silent --show-error \
+              --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/spaces/${{ inputs.spaceId }}/pages?title=${encoded}" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'Accept: application/json' \
+            | jq -r '.results[0].id // "null"')
+          if [ "$pageId" == "null" ]; then
+            echo "The title is taken but the page could not be found — it may live outside this space." >&2
+            exit 1
+          fi
+          current=$(curl --silent --show-error \
+              --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'Accept: application/json' | jq -r '.version.number')
+          update=$(jq -n \
+            --arg id "$pageId" --arg title "$title" --arg value "$RELEASE_NOTES" \
+            --argjson version "$((current + 1))" \
+            '{id: $id, status: "current", title: $title,
+              body: {representation: "wiki", value: $value},
+              version: {number: $version, message: "Re-published release notes"}}')
+          code=$(curl --silent --show-error --output /tmp/page-update.json \
+              --write-out '%{http_code}' --request PUT \
+              --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --data "$update")
+          if [ "$code" != "200" ]; then
+            echo "Failed to update the existing page: HTTP ${code}" >&2
+            cat /tmp/page-update.json >&2
+            exit 1
+          fi
+        fi
+
         echo "Page ID: $pageId"
         if [ "$pageId" == "null" ]; then
           echo "Failed to create page"
