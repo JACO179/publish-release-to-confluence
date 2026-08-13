@@ -88,9 +88,11 @@ The action requires the following inputs:
 | `repoName`           | The name of the GitHub repository from which the release notes will be fetched. | True | -                                 |
 | `attachAssets`       | Attach the release's built artifacts to the page, not just its notes.       | False    | `false`                           |
 | `assetPattern`       | Glob selecting which assets to attach (`gh release download --pattern`).    | False    | `*`                               |
-| `githubToken`        | Token used to download assets and read the README. Required when `attachAssets` is true or `readmePageId` is set. | False | - |
-| `readmePageId`       | Page whose body is replaced with the repository README. Empty disables it.  | False    | -                                 |
-| `readmePath`         | Path to the README within the repository.                                   | False    | `README.md`                       |
+| `githubToken`        | Token used to download assets and read the documents. Required when `attachAssets` is true or `docsParentId` is set. | False | - |
+| `restrictUpdates`    | Restrict editing of created pages to the publishing account; reading unchanged. | False | `false`                       |
+| `checksumFile`       | Checksum file whose contents are shown as text on the release page.         | False    | `SHA256SUMS`                      |
+| `docsParentId`       | Parent page under which each matched Markdown file becomes a child page.    | False    | -                                 |
+| `docsPaths`          | Comma-separated globs selecting which Markdown files to publish.            | False    | `README.md`                       |
 
 ### Attaching release assets
 
@@ -120,19 +122,32 @@ Notes:
   release's page and the download link changes each time. If you need a link that
   does not move, point readers at the parent page.
 
-### Mirroring the README
+### Mirroring the documentation
 
-Set `readmePageId` and the repository's README — as it stood at the released tag,
-not on the default branch — is published to that page.
+Set `docsParentId` and every Markdown file matched by `docsPaths` — as it stood
+at the released tag, not on the default branch — is published as a child page
+under it, titled after the file.
 
 ```yaml
-    readmePageId: "123456789"
+    docsParentId: "123456789"
+    docsPaths: "README.md,docs/*.md"
     githubToken: ${{ github.token }}
 ```
 
-> **The whole page body is replaced.** Point this at a page that exists only for
-> the README. A landing page carrying hand-written content would lose it on every
-> release.
+Giving, for example, `srx2fgt/{README, frontend, architecture}`.
+
+> **Each child page's body is replaced on every release**, so those pages must
+> exist only for this. The parent is never written to, so it is free to carry an
+> index by hand.
+
+A `*` does not cross a directory separator and patterns anchor at the repository
+root, so `docs/*.md` takes `docs/frontend.md` and leaves `docs/agents/domain.md`
+alone, and `README.md` cannot also match `docs/README.md`. Use `docs/**/*.md` to
+reach into subdirectories.
+
+Confluence page titles are unique per space, and names like `architecture` are
+generic enough to already belong to someone else. A page with a matching title
+found under a **different** parent stops the run rather than being overwritten.
 
 The Markdown is rendered by GitHub's own `/markdown` endpoint, so tables, fenced
 code and reference links come back correct, and the result is then reduced to the
