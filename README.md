@@ -86,6 +86,37 @@ The action requires the following inputs:
 | `ConfluenceSpaceKey` | The key of the Confluence space where the release page will be created.     | False     | -                                 |
 | `repoOwner`          | The owner of the GitHub repository from which the release notes will be fetched. | True | -                                 |
 | `repoName`           | The name of the GitHub repository from which the release notes will be fetched. | True | -                                 |
+| `attachAssets`       | Attach the release's built artifacts to the page, not just its notes.       | False    | `false`                           |
+| `assetPattern`       | Glob selecting which assets to attach (`gh release download --pattern`).    | False    | `*`                               |
+| `githubToken`        | Token used to download the assets. Required when `attachAssets` is true.    | False    | -                                 |
+
+### Attaching release assets
+
+With `attachAssets: true` the action downloads the release's artifacts and adds
+them to the page it just created. This is aimed at a **private** repository whose
+users are not all on GitHub: colleagues open the Confluence page and download the
+build without needing an account or repository access.
+
+```yaml
+    attachAssets: true
+    assetPattern: "*.html"          # or "*" for everything
+    githubToken: ${{ github.token }}
+```
+
+Notes:
+
+- `githubToken` must be able to read the release. When the release lives in the
+  same repository as the workflow, `${{ github.token }}` is enough.
+- Attachment upload uses the **v1** API
+  (`/wiki/rest/api/content/{id}/child/attachment`) even though page creation here
+  uses v2, and it requires the `X-Atlassian-Token: no-check` header — without it
+  Confluence rejects the POST as CSRF.
+- Confluence enforces a maximum attachment size (100 MB on Cloud by default,
+  though administrators often lower it). A rejected upload fails the step and
+  prints the message Confluence returned.
+- The action creates a **new page per release**, so attachments live on that
+  release's page and the download link changes each time. If you need a link that
+  does not move, point readers at the parent page.
 
 ## Usage
 

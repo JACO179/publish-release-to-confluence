@@ -53,6 +53,30 @@ inputs:
     Description: Name of the repository. This will be used to fetch the release notes.
     required: true
     type: string
+  # Release assets
+  attachAssets:
+    description: >-
+      Attach the release's built artifacts to the page as well as its notes.
+      Lets people who have no access to the repository — or no GitHub account
+      at all — download the build from Confluence.
+    required: false
+    default: "false"
+    type: string
+  assetPattern:
+    description: >-
+      Glob selecting which release assets to attach, passed to
+      `gh release download --pattern`. Defaults to all of them.
+    required: false
+    default: "*"
+    type: string
+  githubToken:
+    description: >-
+      Token used to download the release assets. Required when attachAssets is
+      true, and it must be able to read the release — for a private repository
+      the workflow's own `${{ github.token }}` is the usual answer.
+    required: false
+    default: ""
+    type: string
 
 runs:
   using: "composite"
@@ -84,6 +108,9 @@ runs:
       env:
         RELEASE_NOTES: ${{ fromJSON(steps.get-release.outputs.result).body }}
         RELEASE_URL: ${{ fromJSON(steps.get-release.outputs.result).url }}
+        CONFLUENCE_BASE_URL: ${{ inputs.ConfluenceBaseUrl }}
+        CONFLUENCE_EMAIL: ${{ inputs.confluence_email }}
+        CONFLUENCE_API_TOKEN: ${{ inputs.confluence_api_token }}
       run: |
         # Add additional line before the content
         RELEASE_NOTES="✅ New *${{ inputs.appName }}* Release [${{ inputs.tag }}](${RELEASE_URL}) $(date)\n\n${RELEASE_NOTES}"
@@ -123,9 +150,11 @@ runs:
         )
 
         echo "Payload: $payload"
+        # Credentials go through the environment, not the command line: argv is
+        # readable by any other process on the runner.
         response=$(curl --request POST \
-            --url '${{ inputs.ConfluenceBaseUrl }}/wiki/api/v2/pages' \
-            --user '${{ inputs.confluence_email }}:${{ inputs.confluence_api_token }}' \
+            --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages" \
+            --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
             --header 'Accept: application/json' \
             --header 'Content-Type: application/json' \
             --data "$payload")
@@ -137,4 +166,67 @@ runs:
           exit 1
         fi
         echo "pageId=$pageId" >> $GITHUB_ENV
-        echo "pageId=$pageId" >> $GITHUB_ENV_FILE
+        echo "pageId=$pageId" >> $GITHUB_OUTPUT
+
+    # Release notes tell people what changed; the assets let them actually have
+    # it. For a private repository this is the whole point — a colleague with no
+    # GitHub account can still download the build from the Confluence page.
+    - name: Attach release assets to the page
+      if: inputs.attachAssets == 'true'
+      shell: bash
+      env:
+        PAGE_ID: ${{ steps.post_to_confluence.outputs.pageId }}
+        TAG: ${{ inputs.tag }}
+        REPO: ${{ inputs.repoOwner }}/${{ inputs.repoName }}
+        PATTERN: ${{ inputs.assetPattern }}
+        GH_TOKEN: ${{ inputs.githubToken }}
+        CONFLUENCE_BASE_URL: ${{ inputs.ConfluenceBaseUrl }}
+        CONFLUENCE_EMAIL: ${{ inputs.confluence_email }}
+        CONFLUENCE_API_TOKEN: ${{ inputs.confluence_api_token }}
+      run: |
+        if [ -z "${GH_TOKEN}" ]; then
+          echo "attachAssets is true but githubToken is empty — pass \${{ github.token }}." >&2
+          exit 1
+        fi
+
+        workdir="$(mktemp -d)"
+        gh release download "${TAG}" --repo "${REPO}" --pattern "${PATTERN}" --dir "${workdir}"
+
+        shopt -s nullglob
+        files=("${workdir}"/*)
+        if [ ${#files[@]} -eq 0 ]; then
+          echo "No release assets matched pattern '${PATTERN}' on ${TAG}." >&2
+          exit 1
+        fi
+
+        # Attachment upload is still v1, even on Cloud where pages are v2, and
+        # X-Atlassian-Token: no-check is mandatory or the POST is refused as CSRF.
+        attach_url="${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${PAGE_ID}/child/attachment"
+        failed=0
+        for f in "${files[@]}"; do
+          name="$(basename "$f")"
+          echo "Attaching ${name} ($(du -h "$f" | cut -f1)) …"
+          code=$(curl --silent --show-error --output /tmp/attach-response.json \
+              --write-out '%{http_code}' \
+              --request POST \
+              --url "${attach_url}" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'X-Atlassian-Token: no-check' \
+              --form "file=@${f}" \
+              --form 'minorEdit=true')
+          if [ "$code" != "200" ]; then
+            echo "  failed: HTTP ${code}" >&2
+            # Confluence reports the size cap here; a large single-file build is
+            # the likeliest reason an upload is rejected.
+            jq -r '.message // .' /tmp/attach-response.json >&2 || cat /tmp/attach-response.json >&2
+            failed=1
+          else
+            echo "  ok"
+          fi
+        done
+
+        rm -rf "${workdir}"
+        if [ "$failed" -ne 0 ]; then
+          echo "One or more attachments failed to upload." >&2
+          exit 1
+        fi
