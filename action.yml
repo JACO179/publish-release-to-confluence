@@ -80,6 +80,15 @@ inputs:
     required: false
     default: ""
     type: string
+  restrictUpdates:
+    description: >-
+      Restrict editing of the created release page to the account doing the
+      publishing. Reading is left inherited from the space, so the page stays
+      visible to everyone who can see the space — only editing is closed, so a
+      published record of what shipped cannot be altered afterwards.
+    required: false
+    default: "false"
+    type: string
   # Checksums shown as text
   checksumFile:
     description: >-
@@ -252,6 +261,42 @@ runs:
         fi
         echo "pageId=$pageId" >> $GITHUB_ENV
         echo "pageId=$pageId" >> $GITHUB_OUTPUT
+
+        # A published release page is a record of what shipped. Left editable by
+        # the whole space it can be changed by anyone, silently and after the
+        # fact, and the next publish of that tag would not restore it.
+        #
+        # Only the update operation is restricted; read is left inherited, so
+        # the page stays visible to everyone the space is visible to — which is
+        # the entire reason it is published there.
+        if [ "${{ inputs.restrictUpdates }}" == "true" ]; then
+          accountId=$(curl --silent --show-error --fail \
+              --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/user/current" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'Accept: application/json' | jq -r '.accountId')
+          if [ -z "$accountId" ] || [ "$accountId" == "null" ]; then
+            echo "Could not determine the publishing account for restrictions." >&2
+            exit 1
+          fi
+          # PUT replaces the restrictions wholesale, so republishing a tag
+          # re-asserts them rather than stacking duplicates.
+          restrictions=$(jq -n --arg id "$accountId" \
+            '[{operation: "update",
+               restrictions: {user: [{type: "known", accountId: $id}], group: []}}]')
+          code=$(curl --silent --show-error --output /tmp/restrict-response.json \
+              --write-out '%{http_code}' --request PUT \
+              --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${pageId}/restriction" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --data "$restrictions")
+          if [ "$code" != "200" ]; then
+            echo "Failed to restrict editing: HTTP ${code}" >&2
+            cat /tmp/restrict-response.json >&2
+            exit 1
+          fi
+          echo "Editing restricted to the publishing account; reading unchanged."
+        fi
 
     # Release notes tell people what changed; the assets let them actually have
     # it. For a private repository this is the whole point — a colleague with no
