@@ -345,7 +345,11 @@ runs:
           '{text: $text, mode: "gfm", context: $ctx}' > /tmp/md-request.json
         gh api --method POST /markdown --input /tmp/md-request.json > /tmp/readme.html
 
-        python3 - "${TAG}" "${REPO}" < /tmp/readme.html > /tmp/storage.html <<'PYTHON'
+        # The HTML is passed by path, not on stdin: `python3 -` takes the program
+        # from stdin, so the heredoc below already owns it and sys.stdin.read()
+        # would come back empty — which it silently did, publishing a page that
+        # held nothing but the banner.
+        python3 - "${TAG}" "${REPO}" /tmp/readme.html > /tmp/storage.html <<'PYTHON'
         import html, re, sys
         from html.parser import HTMLParser
         from urllib.parse import urljoin
@@ -422,10 +426,13 @@ runs:
                 if not self.dropping:
                     self.out.append(html.escape(data, quote=False))
 
-        tag, repo = sys.argv[1], sys.argv[2]
+        tag, repo, source = sys.argv[1], sys.argv[2], sys.argv[3]
         BLOB_BASE = "https://github.com/%s/blob/%s/" % (repo, tag)
+        rendered = open(source, encoding="utf-8").read()
+        if not rendered.strip():
+            sys.exit("rendered README is empty — nothing to publish")
         parser = ToStorage()
-        parser.feed(sys.stdin.read())
+        parser.feed(rendered)
         parser.close()
         for name, emitted in reversed(parser.stack):
             if emitted:
@@ -437,6 +444,11 @@ runs:
         body = re.sub(r'<a href="[^"]*"\s*></a>', "", body)
         body = re.sub(r"(?:<br/>\s*){2,}", "<br/>", body)
         body = re.sub(r"<p>(?:\s|<br/>)*</p>", "", body)
+
+        # A banner with nothing under it is a published page that looks fine and
+        # says nothing. Refuse rather than overwrite a page with an empty one.
+        if not body.strip():
+            sys.exit("sanitized README body is empty — refusing to publish a banner alone")
 
         banner = (
             "<p><strong>Published automatically from the %s README at %s.</strong> "
