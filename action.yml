@@ -577,6 +577,50 @@ runs:
         sys.stdout.write(banner + body)
         PYTHON
 
+        # Mermaid is rendered by GitHub in the browser, not by its Markdown API,
+        # so a fence arrives here as a code block and stays one — which is what
+        # a Confluence reader saw: the source of a diagram instead of a diagram.
+        # Lift each fence out before rendering, draw it, and put an image back.
+        cat > /tmp/mermaid.py <<'PYTHON'
+        import os, re, sys
+
+        mode, doc_md, out_md, diag_dir, slug = sys.argv[1:6]
+
+        if mode == "extract":
+            src = open(doc_md, encoding="utf-8").read()
+            os.makedirs(diag_dir, exist_ok=True)
+            found = []
+
+            def take(match):
+                n = len(found) + 1
+                found.append(match.group(1))
+                # A bare token on its own line survives Markdown rendering as a
+                # paragraph, which is what the image replaces later.
+                return "CONFLUENCEMERMAID%dPLACEHOLDER" % n
+
+            src = re.sub(r"```mermaid\n(.*?)```", take, src, flags=re.S)
+            for n, body in enumerate(found, 1):
+                with open(os.path.join(diag_dir, "%s-diagram-%d.mmd" % (slug, n)),
+                          "w", encoding="utf-8") as fh:
+                    fh.write(body)
+            open(out_md, "w", encoding="utf-8").write(src)
+            print(len(found))
+
+        elif mode == "embed":
+            html = open(doc_md, encoding="utf-8").read()
+            count = int(sys.argv[6])
+            for n in range(1, count + 1):
+                name = "%s-diagram-%d.png" % (slug, n)
+                # Width is capped because these diagrams are far taller than
+                # they are wide; full size would dominate the page.
+                image = ('<ac:image ac:align="center" ac:width="900">'
+                         '<ri:attachment ri:filename="%s" /></ac:image>' % name)
+                token = "CONFLUENCEMERMAID%dPLACEHOLDER" % n
+                html = html.replace("<p>%s</p>" % token, image)
+                html = html.replace(token, image)
+            open(out_md, "w", encoding="utf-8").write(html)
+        PYTHON
+
         # Which files to publish. A `*` must not cross a directory separator —
         # docs/*.md means the documents in docs/, not everything beneath it — and
         # patterns anchor at the repository root, so README.md cannot also pick
@@ -624,7 +668,10 @@ runs:
           echo "--- ${doc} -> '${title}'"
 
           gh api "repos/${REPO}/contents/${doc}?ref=${TAG}" --jq '.content' \
-            | base64 -d > /tmp/doc.md
+            | base64 -d > /tmp/doc-raw.md
+          rm -rf /tmp/diagrams && mkdir -p /tmp/diagrams
+          diagrams=$(python3 /tmp/mermaid.py extract /tmp/doc-raw.md /tmp/doc.md /tmp/diagrams "$title")
+          [ "$diagrams" -gt 0 ] && echo "  ${diagrams} mermaid diagram(s)"
           jq -n --rawfile text /tmp/doc.md --arg ctx "${REPO}" \
             '{text: $text, mode: "gfm", context: $ctx}' > /tmp/doc-request.json
           gh api --method POST /markdown --input /tmp/doc-request.json > /tmp/doc.html
@@ -686,6 +733,64 @@ runs:
             exit 1
           fi
           echo "  ${action}"
+
+          if [ "$diagrams" -gt 0 ]; then
+            printf '{"args":["--no-sandbox","--disable-setuid-sandbox"]}' > /tmp/pptr.json
+            for n in $(seq 1 "$diagrams"); do
+              png="/tmp/diagrams/${title}-diagram-${n}.png"
+              npx -y @mermaid-js/mermaid-cli@11 \
+                -i "/tmp/diagrams/${title}-diagram-${n}.mmd" -o "$png" \
+                -p /tmp/pptr.json -b white -s 2 >/dev/null 2>&1
+              if [ ! -s "$png" ]; then
+                echo "  failed to render diagram ${n}" >&2
+                exit 1
+              fi
+              name=$(basename "$png")
+              att="${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${pageId}/child/attachment"
+              existing=$(curl --silent --show-error --get --url "$att" \
+                  --data-urlencode "filename=${name}" \
+                  --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                  --header 'Accept: application/json' | jq -r '.results[0].id // ""')
+              [ -n "$existing" ] && target="${att}/${existing}/data" || target="$att"
+              acode=$(curl --silent --show-error --output /tmp/diag-response.json \
+                  --write-out '%{http_code}' --request POST --url "$target" \
+                  --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                  --header 'X-Atlassian-Token: no-check' \
+                  --form "file=@${png}" --form 'minorEdit=true')
+              if [ "$acode" != "200" ]; then
+                echo "  failed to attach ${name}: HTTP ${acode}" >&2
+                cat /tmp/diag-response.json >&2
+                exit 1
+              fi
+              echo "  drew and attached ${name}"
+            done
+
+            # The image can only be referenced once the attachment exists, so the
+            # body is published a second time with the placeholders replaced.
+            python3 /tmp/mermaid.py embed /tmp/doc-storage.html /tmp/doc-final.html \
+              /tmp/diagrams "$title" "$diagrams"
+            version=$(curl --silent --show-error \
+                --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
+                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                --header 'Accept: application/json' | jq -r '.version.number')
+            payload=$(jq -n --arg id "$pageId" --arg title "$title" \
+              --rawfile value /tmp/doc-final.html --argjson version "$((version + 1))" \
+              '{id: $id, status: "current", title: $title,
+                body: {representation: "storage", value: $value},
+                version: {number: $version, message: "Embedded diagrams"}}')
+            code=$(curl --silent --show-error --output /tmp/doc-response.json \
+                --write-out '%{http_code}' --request PUT \
+                --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
+                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                --header 'Accept: application/json' --header 'Content-Type: application/json' \
+                --data "$payload")
+            if [ "$code" != "200" ]; then
+              echo "  failed to embed diagrams: HTTP ${code}" >&2
+              cat /tmp/doc-response.json >&2
+              exit 1
+            fi
+            echo "  diagrams embedded"
+          fi
 
           if [ "${RESTRICT}" == "true" ]; then
             accountId=$(curl --silent --show-error --fail \

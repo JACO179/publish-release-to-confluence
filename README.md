@@ -148,6 +148,14 @@ XHTML subset Confluence's storage format accepts. Two consequences worth knowing
 The published page opens with a line stating which repository and tag it came
 from, and that edits made in Confluence are overwritten by the next release.
 
+**Mermaid diagrams are drawn, not quoted.** GitHub renders mermaid in the
+browser rather than in its Markdown API, so a fence would otherwise arrive as a
+code block and stay one — the source of a diagram instead of a diagram. Each
+fence is lifted out before rendering, drawn with `@mermaid-js/mermaid-cli`,
+attached to the page, and referenced with an `<ac:image>`. That needs the page
+to exist first, so a document containing diagrams is published twice: once with
+placeholders, then again with the images in place.
+
 ## Usage
 
 To use this action in your GitHub workflow, add the following step:
