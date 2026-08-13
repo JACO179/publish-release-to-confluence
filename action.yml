@@ -73,8 +73,10 @@ inputs:
     description: >-
       Token used to download the release assets and read the README. Required
       when attachAssets is true or readmePageId is set, and it must be able to
-      read the repository — for a private one the workflow's own
-      `${{ github.token }}` is the usual answer.
+      read the repository — for a private one the workflow's own github.token is
+      the usual answer. (Written without expression braces deliberately: GitHub
+      evaluates them even inside a description, where no context exists yet, and
+      the whole action fails to load.)
     required: false
     default: ""
     type: string
