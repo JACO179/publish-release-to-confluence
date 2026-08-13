@@ -155,10 +155,11 @@ runs:
         # without this the downloads exist and nobody can see them. The macro
         # lists whatever is attached at view time, which is why it can be added
         # here, before the files themselves have been uploaded.
+        # Newlines via $'\n' rather than a literal line break: the surrounding
+        # YAML block scalar strips indentation, and wiki markup needs "h2." at
+        # the start of its line, so an indented continuation would not render.
         if [ "${{ inputs.attachAssets }}" == "true" ]; then
-          RELEASE_NOTES="${RELEASE_NOTES}
-h2. Downloads
-{attachments:preview=false|upload=false|old=false}"
+          RELEASE_NOTES="${RELEASE_NOTES}"$'\n'"h2. Downloads"$'\n'"{attachments:preview=false|upload=false|old=false}"
         fi
 
         # Prepare the payload
