@@ -88,7 +88,9 @@ The action requires the following inputs:
 | `repoName`           | The name of the GitHub repository from which the release notes will be fetched. | True | -                                 |
 | `attachAssets`       | Attach the release's built artifacts to the page, not just its notes.       | False    | `false`                           |
 | `assetPattern`       | Glob selecting which assets to attach (`gh release download --pattern`).    | False    | `*`                               |
-| `githubToken`        | Token used to download the assets. Required when `attachAssets` is true.    | False    | -                                 |
+| `githubToken`        | Token used to download assets and read the README. Required when `attachAssets` is true or `readmePageId` is set. | False | - |
+| `readmePageId`       | Page whose body is replaced with the repository README. Empty disables it.  | False    | -                                 |
+| `readmePath`         | Path to the README within the repository.                                   | False    | `README.md`                       |
 
 ### Attaching release assets
 
@@ -117,6 +119,34 @@ Notes:
 - The action creates a **new page per release**, so attachments live on that
   release's page and the download link changes each time. If you need a link that
   does not move, point readers at the parent page.
+
+### Mirroring the README
+
+Set `readmePageId` and the repository's README — as it stood at the released tag,
+not on the default branch — is published to that page.
+
+```yaml
+    readmePageId: "123456789"
+    githubToken: ${{ github.token }}
+```
+
+> **The whole page body is replaced.** Point this at a page that exists only for
+> the README. A landing page carrying hand-written content would lose it on every
+> release.
+
+The Markdown is rendered by GitHub's own `/markdown` endpoint, so tables, fenced
+code and reference links come back correct, and the result is then reduced to the
+XHTML subset Confluence's storage format accepts. Two consequences worth knowing:
+
+- **Images are removed.** Status badges are typically served from endpoints that
+  require repository access, so for readers who have none — the people this page
+  exists for — they would render as broken images. Their surrounding links are
+  dropped with them rather than left behind as empty anchors.
+- **Heading self-links are unwrapped**, since the `#anchor` targets GitHub adds do
+  not exist on a Confluence page.
+
+The published page opens with a line stating which repository and tag it came
+from, and that edits made in Confluence are overwritten by the next release.
 
 ## Usage
 

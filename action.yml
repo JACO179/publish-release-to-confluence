@@ -71,11 +71,29 @@ inputs:
     type: string
   githubToken:
     description: >-
-      Token used to download the release assets. Required when attachAssets is
-      true, and it must be able to read the release — for a private repository
-      the workflow's own `${{ github.token }}` is the usual answer.
+      Token used to download the release assets and read the README. Required
+      when attachAssets is true or readmePageId is set, and it must be able to
+      read the repository — for a private one the workflow's own
+      `${{ github.token }}` is the usual answer.
     required: false
     default: ""
+    type: string
+  # README mirroring
+  readmePageId:
+    description: >-
+      Page whose body is replaced with the repository README at this tag. Left
+      empty, the README is not published at all.
+
+      The whole body is replaced, so point this at a page that exists only for
+      the README — not at a landing page carrying hand-written content, which
+      would be overwritten on every release.
+    required: false
+    default: ""
+    type: string
+  readmePath:
+    description: Path to the README within the repository.
+    required: false
+    default: "README.md"
     type: string
 
 runs:
@@ -230,3 +248,164 @@ runs:
           echo "One or more attachments failed to upload." >&2
           exit 1
         fi
+
+    # Mirrors the repository README onto a page, so the documentation a reader
+    # sees in Confluence is the documentation that shipped with the release.
+    - name: Publish README to Confluence
+      if: inputs.readmePageId != ''
+      shell: bash
+      env:
+        PAGE_ID: ${{ inputs.readmePageId }}
+        README_PATH: ${{ inputs.readmePath }}
+        TAG: ${{ inputs.tag }}
+        REPO: ${{ inputs.repoOwner }}/${{ inputs.repoName }}
+        GH_TOKEN: ${{ inputs.githubToken }}
+        CONFLUENCE_BASE_URL: ${{ inputs.ConfluenceBaseUrl }}
+        CONFLUENCE_EMAIL: ${{ inputs.confluence_email }}
+        CONFLUENCE_API_TOKEN: ${{ inputs.confluence_api_token }}
+      run: |
+        if [ -z "${GH_TOKEN}" ]; then
+          echo "readmePageId is set but githubToken is empty — pass \${{ github.token }}." >&2
+          exit 1
+        fi
+
+        # The README as of this tag, not as of the default branch: the page
+        # should describe the release it is published beside.
+        gh api "repos/${REPO}/contents/${README_PATH}?ref=${TAG}" \
+          --jq '.content' | base64 -d > /tmp/readme.md
+
+        # GitHub renders its own flavour of Markdown better than anything we
+        # could reimplement here — tables, fenced code and reference links all
+        # come back correct.
+        jq -n --rawfile text /tmp/readme.md --arg ctx "${REPO}" \
+          '{text: $text, mode: "gfm", context: $ctx}' > /tmp/md-request.json
+        gh api --method POST /markdown --input /tmp/md-request.json > /tmp/readme.html
+
+        python3 - "${TAG}" "${REPO}" < /tmp/readme.html > /tmp/storage.html <<'PYTHON'
+        import html, re, sys
+        from html.parser import HTMLParser
+
+        # Confluence storage format accepts a small XHTML subset. Anything else
+        # is either dropped or unwrapped, keeping its text.
+        KEEP = {"p", "br", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
+                "ul", "ol", "li", "strong", "em", "b", "i", "code", "pre",
+                "blockquote", "table", "thead", "tbody", "tr", "th", "td",
+                "a", "del", "sup", "sub"}
+        VOID = {"br", "hr"}
+        # Images go entirely. The README's status badges are served from
+        # endpoints that require repository access, so to the audience this page
+        # exists for they would render as broken images.
+        DROP = {"img", "svg", "path", "script", "style", "picture", "source",
+                "iframe", "input", "button"}
+
+        class ToStorage(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=True)
+                self.out, self.stack, self.dropping = [], [], 0
+
+            def handle_starttag(self, tag, attrs):
+                if self.dropping:
+                    if tag not in VOID and tag not in ("img", "input", "source", "path"):
+                        self.dropping += 1
+                    return
+                if tag in DROP:
+                    if tag not in ("img", "input", "source", "path"):
+                        self.dropping = 1
+                    return
+                if tag in VOID:
+                    self.out.append("<%s/>" % tag)
+                    return
+                if tag not in KEEP:
+                    self.stack.append((tag, False))      # unwrap, keep contents
+                    return
+                if tag == "a":
+                    href = dict(attrs).get("href", "")
+                    # GitHub wraps every heading in a self-link to "#anchor";
+                    # those anchors do not exist on a Confluence page.
+                    if not href or href.startswith("#"):
+                        self.stack.append((tag, False))
+                        return
+                    self.out.append('<a href="%s">' % html.escape(href, quote=True))
+                    self.stack.append((tag, True))
+                    return
+                self.out.append("<%s>" % tag)
+                self.stack.append((tag, True))
+
+            def handle_endtag(self, tag):
+                if self.dropping:
+                    self.dropping -= 1
+                    return
+                if tag in VOID or tag in DROP:
+                    return
+                for i in range(len(self.stack) - 1, -1, -1):
+                    if self.stack[i][0] == tag:
+                        if self.stack[i][1]:
+                            self.out.append("</%s>" % tag)
+                        del self.stack[i:]
+                        return
+
+            def handle_data(self, data):
+                if not self.dropping:
+                    self.out.append(html.escape(data, quote=False))
+
+        tag, repo = sys.argv[1], sys.argv[2]
+        parser = ToStorage()
+        parser.feed(sys.stdin.read())
+        parser.close()
+        for name, emitted in reversed(parser.stack):
+            if emitted:
+                parser.out.append("</%s>" % name)
+
+        body = "".join(parser.out)
+        # Dropping a badge image leaves its link wrapper behind as an empty
+        # anchor, and a row of badges collapses to a paragraph of line breaks.
+        body = re.sub(r'<a href="[^"]*"\s*></a>', "", body)
+        body = re.sub(r"(?:<br/>\s*){2,}", "<br/>", body)
+        body = re.sub(r"<p>(?:\s|<br/>)*</p>", "", body)
+
+        banner = (
+            "<p><strong>Published automatically from the %s README at %s.</strong> "
+            "Edits made here are overwritten by the next release.</p><hr/>"
+            % (html.escape(repo), html.escape(tag))
+        )
+        sys.stdout.write(banner + body)
+        PYTHON
+
+        # A page update must state the version it supersedes, so read it first.
+        page=$(curl --silent --show-error --fail \
+            --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${PAGE_ID}" \
+            --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+            --header 'Accept: application/json')
+        title=$(echo "$page" | jq -r '.title')
+        version=$(echo "$page" | jq -r '.version.number')
+        next=$((version + 1))
+        echo "Updating '${title}' (page ${PAGE_ID}) from version ${version} to ${next}"
+
+        payload=$(jq -n \
+          --arg id "${PAGE_ID}" \
+          --arg title "${title}" \
+          --arg value "$(cat /tmp/storage.html)" \
+          --argjson version "${next}" \
+          '{
+             id: $id,
+             status: "current",
+             title: $title,
+             body: { representation: "storage", value: $value },
+             version: { number: $version, message: "Published from the repository README" }
+           }')
+
+        code=$(curl --silent --show-error --output /tmp/readme-response.json \
+            --write-out '%{http_code}' \
+            --request PUT \
+            --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${PAGE_ID}" \
+            --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+            --header 'Accept: application/json' \
+            --header 'Content-Type: application/json' \
+            --data "$payload")
+        if [ "$code" != "200" ]; then
+          echo "Failed to update the README page: HTTP ${code}" >&2
+          jq -r '.errors[]?.title // .message // .' /tmp/readme-response.json >&2 \
+            || cat /tmp/readme-response.json >&2
+          exit 1
+        fi
+        echo "README published."
