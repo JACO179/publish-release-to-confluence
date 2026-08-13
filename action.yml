@@ -269,11 +269,29 @@ runs:
         failed=0
         for f in "${files[@]}"; do
           name="$(basename "$f")"
-          echo "Attaching ${name} ($(du -h "$f" | cut -f1)) …"
+
+          # Adding an attachment whose name is already on the page is refused —
+          # "Cannot add a new attachment with same file name as an existing
+          # attachment". Replacing it is a different endpoint, so ask first.
+          existing=$(curl --silent --show-error --get \
+              --url "${attach_url}" \
+              --data-urlencode "filename=${name}" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'Accept: application/json' \
+            | jq -r '.results[0].id // ""')
+
+          if [ -n "$existing" ]; then
+            target="${attach_url}/${existing}/data"
+            echo "Replacing ${name} ($(du -h "$f" | cut -f1)) …"
+          else
+            target="${attach_url}"
+            echo "Attaching ${name} ($(du -h "$f" | cut -f1)) …"
+          fi
+
           code=$(curl --silent --show-error --output /tmp/attach-response.json \
               --write-out '%{http_code}' \
               --request POST \
-              --url "${attach_url}" \
+              --url "${target}" \
               --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
               --header 'X-Atlassian-Token: no-check' \
               --form "file=@${f}" \
