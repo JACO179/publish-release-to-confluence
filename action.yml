@@ -286,6 +286,7 @@ runs:
         python3 - "${TAG}" "${REPO}" < /tmp/readme.html > /tmp/storage.html <<'PYTHON'
         import html, re, sys
         from html.parser import HTMLParser
+        from urllib.parse import urljoin
 
         # Confluence storage format accepts a small XHTML subset. Anything else
         # is either dropped or unwrapped, keeping its text.
@@ -322,11 +323,20 @@ runs:
                     return
                 if tag == "a":
                     href = dict(attrs).get("href", "")
-                    # GitHub wraps every heading in a self-link to "#anchor";
-                    # those anchors do not exist on a Confluence page.
+                    # Anchors are dropped, links kept. GitHub wraps every heading
+                    # in a self-link to "#anchor", and in-page anchors written by
+                    # hand do not survive either: Confluence derives its own
+                    # heading ids, so "#requirements" would land nowhere.
                     if not href or href.startswith("#"):
                         self.stack.append((tag, False))
                         return
+                    # A relative link is relative to the repository, not to
+                    # Confluence. Left alone it resolves against the wiki host
+                    # and 404s there; made absolute it at least reaches the file
+                    # it names, for a reader who has repository access.
+                    if not re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", href) \
+                            and not href.startswith("//"):
+                        href = urljoin(BLOB_BASE, href)
                     self.out.append('<a href="%s">' % html.escape(href, quote=True))
                     self.stack.append((tag, True))
                     return
@@ -351,6 +361,7 @@ runs:
                     self.out.append(html.escape(data, quote=False))
 
         tag, repo = sys.argv[1], sys.argv[2]
+        BLOB_BASE = "https://github.com/%s/blob/%s/" % (repo, tag)
         parser = ToStorage()
         parser.feed(sys.stdin.read())
         parser.close()
