@@ -150,6 +150,17 @@ runs:
         # Replace '\n' with '<br/>'
         RELEASE_NOTES=$(echo -e "${RELEASE_NOTES}" | sed 's/\\n/<br\/>/g')
 
+        # An attachment uploaded through the API is on the page but not in it:
+        # Confluence shows attachments only where something asks for them, so
+        # without this the downloads exist and nobody can see them. The macro
+        # lists whatever is attached at view time, which is why it can be added
+        # here, before the files themselves have been uploaded.
+        if [ "${{ inputs.attachAssets }}" == "true" ]; then
+          RELEASE_NOTES="${RELEASE_NOTES}
+h2. Downloads
+{attachments:preview=false|upload=false|old=false}"
+        fi
+
         # Prepare the payload
         payload=$(jq -n \
         --arg spaceId "${{ inputs.spaceId }}" \
