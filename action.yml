@@ -80,6 +80,15 @@ inputs:
     required: false
     default: ""
     type: string
+  # Checksums shown as text
+  checksumFile:
+    description: >-
+      A checksum file among the release assets whose contents are shown as text
+      on the page, so a reader sees the expected hash beside the download rather
+      than having to fetch a second file to learn it. Empty disables this.
+    required: false
+    default: "SHA256SUMS"
+    type: string
   # README mirroring
   readmePageId:
     description: >-
@@ -255,6 +264,7 @@ runs:
         TAG: ${{ inputs.tag }}
         REPO: ${{ inputs.repoOwner }}/${{ inputs.repoName }}
         PATTERN: ${{ inputs.assetPattern }}
+        CHECKSUM_FILE: ${{ inputs.checksumFile }}
         GH_TOKEN: ${{ inputs.githubToken }}
         CONFLUENCE_BASE_URL: ${{ inputs.ConfluenceBaseUrl }}
         CONFLUENCE_EMAIL: ${{ inputs.confluence_email }}
@@ -319,10 +329,72 @@ runs:
           fi
         done
 
+        # Checksums are worth reading, not just downloading: someone verifying a
+        # file needs the expected hash visible beside the link, without fetching
+        # a second file to find out what the first one should hash to.
+        checksums=""
+        if [ -n "${CHECKSUM_FILE}" ] && [ -f "${workdir}/${CHECKSUM_FILE}" ]; then
+          checksums=$(cat "${workdir}/${CHECKSUM_FILE}")
+        fi
+
         rm -rf "${workdir}"
         if [ "$failed" -ne 0 ]; then
           echo "One or more attachments failed to upload." >&2
           exit 1
+        fi
+
+        if [ -n "$checksums" ]; then
+          page=$(curl --silent --show-error --fail \
+              --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${PAGE_ID}?body-format=storage" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'Accept: application/json')
+          printf '%s' "$page" | jq -r '.body.storage.value' > /tmp/page-body.html
+          printf '%s' "$checksums" > /tmp/checksums.txt
+
+          # Passed by path, never on stdin: `python3 -` reads its program from
+          # stdin, so the heredoc owns it.
+          python3 - /tmp/page-body.html /tmp/checksums.txt "${CHECKSUM_FILE}" > /tmp/page-body-new.html <<'PYTHON'
+        import html, re, sys
+
+        body = open(sys.argv[1], encoding="utf-8").read()
+        sums = open(sys.argv[2], encoding="utf-8").read().strip()
+        name = sys.argv[3]
+
+        # Bounded by markers so republishing replaces the block instead of
+        # appending another copy of it.
+        START = "<!-- checksums:start -->"
+        END = "<!-- checksums:end -->"
+        body = re.sub(re.escape(START) + ".*?" + re.escape(END), "", body, flags=re.S)
+
+        block = (
+            '%s<h2>Checksums</h2>'
+            '<p>SHA-256, as published in <code>%s</code>.</p>'
+            '<pre>%s</pre>%s'
+            % (START, html.escape(name), html.escape(sums), END)
+        )
+        sys.stdout.write(body.rstrip() + block)
+        PYTHON
+
+          version=$(printf '%s' "$page" | jq -r '.version.number')
+          title=$(printf '%s' "$page" | jq -r '.title')
+          payload=$(jq -n --arg id "${PAGE_ID}" --arg title "$title" \
+            --rawfile value /tmp/page-body-new.html --argjson version "$((version + 1))" \
+            '{id: $id, status: "current", title: $title,
+              body: {representation: "storage", value: $value},
+              version: {number: $version, message: "Published checksums"}}')
+          code=$(curl --silent --show-error --output /tmp/sums-response.json \
+              --write-out '%{http_code}' --request PUT \
+              --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${PAGE_ID}" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'Accept: application/json' \
+              --header 'Content-Type: application/json' \
+              --data "$payload")
+          if [ "$code" != "200" ]; then
+            echo "Failed to publish the checksums: HTTP ${code}" >&2
+            cat /tmp/sums-response.json >&2
+            exit 1
+          fi
+          echo "Checksums published."
         fi
 
     # Mirrors the repository README onto a page, so the documentation a reader
