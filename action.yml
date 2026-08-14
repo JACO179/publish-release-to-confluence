@@ -135,6 +135,14 @@ inputs:
     required: false
     default: "README.md"
     type: string
+  docsTitlePrefix:
+    description: >-
+      Prefix added to every page title. Confluence titles are unique per space,
+      so two repositories both publishing a README cannot coexist without one —
+      "ansible/" gives ansible/README beside another project's README.
+    required: false
+    default: ""
+    type: string
   docsTitleStrip:
     description: >-
       Prefix removed from a document's path before it becomes a page title.
@@ -487,6 +495,7 @@ runs:
         DOCS_PARENT_ID: ${{ inputs.docsParentId }}
         DOCS_PATHS: ${{ inputs.docsPaths }}
         DOCS_TITLE_STRIP: ${{ inputs.docsTitleStrip }}
+        DOCS_TITLE_PREFIX: ${{ inputs.docsTitlePrefix }}
         SPACE_ID: ${{ inputs.spaceId }}
         TAG: ${{ inputs.tag }}
         REF: ${{ inputs.ref }}
@@ -708,6 +717,7 @@ runs:
           if [ -n "${DOCS_TITLE_STRIP}" ]; then
             title="${title#${DOCS_TITLE_STRIP}}"
           fi
+          title="${DOCS_TITLE_PREFIX}${title}"
           echo "--- ${doc} -> '${title}'"
 
           gh api "repos/${REPO}/contents/${doc}?ref=${SOURCE_REF}" --jq '.content' \
