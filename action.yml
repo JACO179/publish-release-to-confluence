@@ -16,11 +16,11 @@ inputs:
     type: string
   title:
     description: Title of the page.  Release tag.
-    required: true
+    required: false
     type: string
   parentId:
     description: Parent page id. The release page will be created under this page.
-    required: true
+    required: false
     type: string
   ConfluenceBaseUrl:
     description: Confluence base url
@@ -31,7 +31,7 @@ inputs:
     type: string
   # Release notes
   tag:
-    required: true
+    required: false
     type: string
   confluence_email:
     description: 'Confluence Email'
@@ -43,7 +43,7 @@ inputs:
     type: string
   appName:
     Description: Name of the app. This will be used in the release notes.
-    required: true
+    required: false
     type: string
   repoOwner:
     Description: Owner of the repository. This will be used to fetch the release notes.
@@ -98,6 +98,21 @@ inputs:
     required: false
     default: "SHA256SUMS"
     type: string
+  publishReleaseNotes:
+    description: >-
+      Create the release page. Set false to publish documentation only, for a
+      repository that has no releases — the release-notes steps are skipped
+      entirely and no tag is needed.
+    required: false
+    default: "true"
+    type: string
+  ref:
+    description: >-
+      Git ref the documents are read from. Defaults to `tag`; set it to a branch
+      when publishing documentation without a release.
+    required: false
+    default: ""
+    type: string
   # Documentation mirroring
   docsParentId:
     description: >-
@@ -120,12 +135,23 @@ inputs:
     required: false
     default: "README.md"
     type: string
+  docsTitleStrip:
+    description: >-
+      Prefix removed from a document's path before it becomes a page title.
+      Titles are the path without the .md extension, so a repository holding
+      ansible_playbooks/deploy-certs/README.md gets a page called
+      "ansible_playbooks/deploy-certs/README" unless "ansible_playbooks/" is
+      stripped here.
+    required: false
+    default: ""
+    type: string
 
 runs:
   using: "composite"
   steps:
     - name: Get Release
       id: get-release
+      if: inputs.publishReleaseNotes == 'true'
       uses: actions/github-script@v7
       with:
         script: |
@@ -147,6 +173,7 @@ runs:
 
     - name: Post Release Notes to Confluence
       id: post_to_confluence
+      if: inputs.publishReleaseNotes == 'true'
       shell: bash
       env:
         RELEASE_NOTES: ${{ fromJSON(steps.get-release.outputs.result).body }}
@@ -459,8 +486,10 @@ runs:
       env:
         DOCS_PARENT_ID: ${{ inputs.docsParentId }}
         DOCS_PATHS: ${{ inputs.docsPaths }}
+        DOCS_TITLE_STRIP: ${{ inputs.docsTitleStrip }}
         SPACE_ID: ${{ inputs.spaceId }}
         TAG: ${{ inputs.tag }}
+        REF: ${{ inputs.ref }}
         REPO: ${{ inputs.repoOwner }}/${{ inputs.repoName }}
         GH_TOKEN: ${{ inputs.githubToken }}
         RESTRICT: ${{ inputs.restrictUpdates }}
@@ -472,6 +501,15 @@ runs:
           echo "docsParentId is set but githubToken is empty — pass github.token." >&2
           exit 1
         fi
+
+        # A repository without releases publishes from a branch; one with them
+        # publishes from the tag, so the documents match the build beside them.
+        SOURCE_REF="${REF:-${TAG}}"
+        if [ -z "${SOURCE_REF}" ]; then
+          echo "Neither ref nor tag was given — nothing to read the documents from." >&2
+          exit 1
+        fi
+        echo "Reading documents at ${SOURCE_REF}"
 
         # The sanitizer is written to a file rather than piped in: `python3 -`
         # reads its program from stdin, so a heredoc there leaves sys.stdin
@@ -625,7 +663,7 @@ runs:
         # docs/*.md means the documents in docs/, not everything beneath it — and
         # patterns anchor at the repository root, so README.md cannot also pick
         # up docs/README.md. fnmatch gives neither, hence the explicit translation.
-        gh api "repos/${REPO}/git/trees/${TAG}?recursive=1" \
+        gh api "repos/${REPO}/git/trees/${SOURCE_REF}?recursive=1" \
           --jq '.tree[] | select(.type == "blob") | .path' > /tmp/tree.txt
 
         cat > /tmp/select_docs.py <<'PYTHON'
@@ -656,7 +694,7 @@ runs:
         python3 /tmp/select_docs.py "${DOCS_PATHS}" /tmp/tree.txt > /tmp/selected.txt
 
         if [ ! -s /tmp/selected.txt ]; then
-          echo "No files in ${TAG} matched '${DOCS_PATHS}'." >&2
+          echo "No files in ${SOURCE_REF} matched '${DOCS_PATHS}'." >&2
           exit 1
         fi
         echo "Publishing under page ${DOCS_PARENT_ID}:"
@@ -664,10 +702,15 @@ runs:
 
         while IFS= read -r doc; do
           [ -n "$doc" ] || continue
-          title=$(basename "$doc" .md)
+          # The path, not the basename: a repository of playbooks has a
+          # README.md in every directory, and they cannot all be called README.
+          title="${doc%.md}"
+          if [ -n "${DOCS_TITLE_STRIP}" ]; then
+            title="${title#${DOCS_TITLE_STRIP}}"
+          fi
           echo "--- ${doc} -> '${title}'"
 
-          gh api "repos/${REPO}/contents/${doc}?ref=${TAG}" --jq '.content' \
+          gh api "repos/${REPO}/contents/${doc}?ref=${SOURCE_REF}" --jq '.content' \
             | base64 -d > /tmp/doc-raw.md
           rm -rf /tmp/diagrams && mkdir -p /tmp/diagrams
           diagrams=$(python3 /tmp/mermaid.py extract /tmp/doc-raw.md /tmp/doc.md /tmp/diagrams "$title")
@@ -675,7 +718,7 @@ runs:
           jq -n --rawfile text /tmp/doc.md --arg ctx "${REPO}" \
             '{text: $text, mode: "gfm", context: $ctx}' > /tmp/doc-request.json
           gh api --method POST /markdown --input /tmp/doc-request.json > /tmp/doc.html
-          python3 /tmp/to_storage.py "${TAG}" "${REPO}" /tmp/doc.html "${doc}" > /tmp/doc-storage.html
+          python3 /tmp/to_storage.py "${SOURCE_REF}" "${REPO}" /tmp/doc.html "${doc}" > /tmp/doc-storage.html
 
           encoded=$(printf '%s' "$title" | jq -sRr @uri)
           found=$(curl --silent --show-error \
