@@ -713,7 +713,10 @@ runs:
           gh api "repos/${REPO}/contents/${doc}?ref=${SOURCE_REF}" --jq '.content' \
             | base64 -d > /tmp/doc-raw.md
           rm -rf /tmp/diagrams && mkdir -p /tmp/diagrams
-          diagrams=$(python3 /tmp/mermaid.py extract /tmp/doc-raw.md /tmp/doc.md /tmp/diagrams "$title")
+          # A title may hold a path separator now, and it names files on disk
+          # and attachments in Confluence — neither of which takes a slash.
+          slug=$(printf '%s' "$title" | tr '/' '-')
+          diagrams=$(python3 /tmp/mermaid.py extract /tmp/doc-raw.md /tmp/doc.md /tmp/diagrams "$slug")
           [ "$diagrams" -gt 0 ] && echo "  ${diagrams} mermaid diagram(s)"
           jq -n --rawfile text /tmp/doc.md --arg ctx "${REPO}" \
             '{text: $text, mode: "gfm", context: $ctx}' > /tmp/doc-request.json
@@ -780,9 +783,9 @@ runs:
           if [ "$diagrams" -gt 0 ]; then
             printf '{"args":["--no-sandbox","--disable-setuid-sandbox"]}' > /tmp/pptr.json
             for n in $(seq 1 "$diagrams"); do
-              png="/tmp/diagrams/${title}-diagram-${n}.png"
+              png="/tmp/diagrams/${slug}-diagram-${n}.png"
               npx -y @mermaid-js/mermaid-cli@11 \
-                -i "/tmp/diagrams/${title}-diagram-${n}.mmd" -o "$png" \
+                -i "/tmp/diagrams/${slug}-diagram-${n}.mmd" -o "$png" \
                 -p /tmp/pptr.json -b white -s 2 >/dev/null 2>&1
               if [ ! -s "$png" ]; then
                 echo "  failed to render diagram ${n}" >&2
@@ -811,7 +814,7 @@ runs:
             # The image can only be referenced once the attachment exists, so the
             # body is published a second time with the placeholders replaced.
             python3 /tmp/mermaid.py embed /tmp/doc-storage.html /tmp/doc-final.html \
-              /tmp/diagrams "$title" "$diagrams"
+              /tmp/diagrams "$slug" "$diagrams"
             version=$(curl --silent --show-error \
                 --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
