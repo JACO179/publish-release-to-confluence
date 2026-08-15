@@ -203,7 +203,7 @@ To use this action in your GitHub workflow, add the following step:
 
 ```yaml
 - name: Publish to Confluence
-  uses: uses: Gershon-A/publish-release-to-confluence@v1.0.4
+  uses: JACO179/publish-release-to-confluence@main
   with:
     spaceId: '<spaceId>'
     status: '<status>'
@@ -219,6 +219,9 @@ To use this action in your GitHub workflow, add the following step:
     repoName: '<repoName>'
 ```
 
+This fork cuts no releases of its own, so `@main` is the ref to track. Pin a
+commit SHA instead if you need a target that does not move under you.
+
 Example:
 
 ```yaml
@@ -227,7 +230,7 @@ Example:
     needs: [ release ]
     steps:
       - name: Publish to Confluence Action
-        uses: Gershon-A/publish-release-to-confluence@v1.0.4
+        uses: JACO179/publish-release-to-confluence@main
         with:
           confluence_email: ${{ vars.CONFLUENCE_EMAIL }}
           confluence_api_token: ${{ secrets.CONFLUENCE_API_TOKEN }}
@@ -250,4 +253,3 @@ Example:
 1. Add support for customizing the release notes template.
 2. Add support for customizing the page template.
 3. Add support for page labels.
-4. Add support for updating existing pages.
