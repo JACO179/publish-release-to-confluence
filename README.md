@@ -93,6 +93,7 @@ The action requires the following inputs:
 | `checksumFile`       | Checksum file whose contents are shown as text on the release page.         | False    | `SHA256SUMS`                      |
 | `docsParentId`       | Parent page under which each matched Markdown file becomes a child page.    | False    | -                                 |
 | `docsPaths`          | Comma-separated globs selecting which Markdown files to publish.            | False    | `README.md`                       |
+| `docsTitlePrefix`    | Prefix added to every page title, to keep two repositories' pages apart.    | False    | -                                 |
 | `docsTitleStrip`     | Prefix removed from a document's path before it becomes a page title.       | False    | -                                 |
 | `publishReleaseNotes`| Create the release page. False publishes documentation only.                | False    | `true`                            |
 | `ref`                | Git ref the documents are read from. Defaults to `tag`.                    | False    | -                                 |
@@ -140,11 +141,12 @@ under it, titled after the file.
 Page titles are the document's path without the `.md` extension, because a
 repository of playbooks has a `README.md` in every directory and they cannot all
 be one page. `docsTitleStrip` removes a leading prefix, so
-`ansible_playbooks/deploy-certs/README.md` becomes `deploy-certs/README` rather
-than carrying a directory nobody needs to read.
+`playbooks/deploy-certs/README.md` becomes `deploy-certs/README` rather than
+carrying a directory nobody needs to read.
 
-Giving, for example, `srx2fgt/{README, frontend, architecture}` with
-`docsTitleStrip: "docs/"`.
+`docsTitlePrefix` does the opposite, and for the opposite reason: titles are
+unique per Confluence space, so two repositories both publishing a `README`
+collide. A prefix of `myapp/` gives `myapp/README` beside another project's.
 
 ### Publishing documentation without a release
 
@@ -154,8 +156,8 @@ A repository with no releases sets `publishReleaseNotes: false` and a `ref`:
     publishReleaseNotes: "false"
     ref: main
     docsParentId: "123456789"
-    docsPaths: "README.md,ansible_playbooks/*/README.md"
-    docsTitleStrip: "ansible_playbooks/"
+    docsPaths: "README.md,playbooks/*/README.md"
+    docsTitleStrip: "playbooks/"
 ```
 
 The release-notes and asset steps are skipped entirely, so no tag is needed.

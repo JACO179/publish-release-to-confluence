@@ -147,9 +147,8 @@ inputs:
     description: >-
       Prefix removed from a document's path before it becomes a page title.
       Titles are the path without the .md extension, so a repository holding
-      ansible_playbooks/deploy-certs/README.md gets a page called
-      "ansible_playbooks/deploy-certs/README" unless "ansible_playbooks/" is
-      stripped here.
+      playbooks/deploy-certs/README.md gets a page called
+      "playbooks/deploy-certs/README" unless "playbooks/" is stripped here.
     required: false
     default: ""
     type: string
