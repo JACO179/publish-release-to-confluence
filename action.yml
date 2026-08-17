@@ -798,32 +798,47 @@ runs:
                 --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                 --header 'Accept: application/json' | jq -r '.version.number')
-            # Reviving is the same update with two additions: status brings the
-            # page out of the archive, and parentId puts it back in the tree,
-            # which archiving took away.
-            if [ "$revive" == "true" ]; then
-              payload=$(jq -n --arg id "$pageId" --arg title "$title" \
-                --arg parentId "${DOCS_PARENT_ID}" \
-                --rawfile value /tmp/doc-storage.html --argjson version "$((version + 1))" \
-                '{id: $id, status: "current", title: $title, parentId: $parentId,
-                  body: {representation: "storage", value: $value},
-                  version: {number: $version, message: "Revived from the archive"}}')
-            else
-              payload=$(jq -n --arg id "$pageId" --arg title "$title" \
-                --rawfile value /tmp/doc-storage.html --argjson version "$((version + 1))" \
-                '{id: $id, status: "current", title: $title,
-                  body: {representation: "storage", value: $value},
-                  version: {number: $version, message: "Published from the repository"}}')
-            fi
+            # Status is all this update changes about an archived page: naming a
+            # parent in the same call is a move, and Confluence refuses to move
+            # content that is still archived.
+            [ "$revive" == "true" ] \
+              && message="Revived from the archive" \
+              || message="Published from the repository"
+            payload=$(jq -n --arg id "$pageId" --arg title "$title" \
+              --rawfile value /tmp/doc-storage.html --argjson version "$((version + 1))" \
+              --arg message "$message" \
+              '{id: $id, status: "current", title: $title,
+                body: {representation: "storage", value: $value},
+                version: {number: $version, message: $message}}')
             code=$(curl --silent --show-error --output /tmp/doc-response.json \
                 --write-out '%{http_code}' --request PUT \
                 --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                 --header 'Accept: application/json' --header 'Content-Type: application/json' \
                 --data "$payload")
-            [ "$revive" == "true" ] \
-              && action="revived and updated to version $((version + 1))" \
-              || action="updated to version $((version + 1))"
+            action="updated to version $((version + 1))"
+
+            # Out of the archive, the move is allowed — and needed, because
+            # archiving is what took the page out of the tree.
+            if [ "$revive" == "true" ] && [ "$code" == "200" ]; then
+              parentNow=$(jq -r '.parentId // ""' /tmp/doc-response.json)
+              if [ "$parentNow" != "${DOCS_PARENT_ID}" ]; then
+                version=$(jq -r '.version.number' /tmp/doc-response.json)
+                payload=$(jq -n --arg id "$pageId" --arg title "$title" \
+                  --arg parentId "${DOCS_PARENT_ID}" --argjson version "$((version + 1))" \
+                  '{id: $id, status: "current", title: $title, parentId: $parentId,
+                    version: {number: $version, message: "Re-homed after reviving"}}')
+                code=$(curl --silent --show-error --output /tmp/doc-response.json \
+                    --write-out '%{http_code}' --request PUT \
+                    --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
+                    --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                    --header 'Accept: application/json' --header 'Content-Type: application/json' \
+                    --data "$payload")
+                action="revived and updated to version $((version + 1))"
+              else
+                action="revived and updated to version $((version + 1))"
+              fi
+            fi
           else
             payload=$(jq -n --arg spaceId "${SPACE_ID}" --arg title "$title" \
               --arg parentId "${DOCS_PARENT_ID}" --rawfile value /tmp/doc-storage.html \
