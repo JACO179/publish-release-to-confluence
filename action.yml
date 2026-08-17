@@ -546,9 +546,11 @@ runs:
                 "blockquote", "table", "thead", "tbody", "tr", "th", "td",
                 "a", "del", "sup", "sub"}
         VOID = {"br", "hr"}
-        # Images go entirely. Status badges are served from endpoints that
-        # require repository access, so to the audience these pages exist for
-        # they would render as broken images.
+        # A remote image goes entirely: status badges are served from endpoints
+        # that require repository access, so to the audience these pages exist
+        # for they would render as broken. An image committed to the repository
+        # is a different thing — it is part of the document, and it is
+        # attachable, so it is kept and dealt with below.
         DROP = {"img", "svg", "path", "script", "style", "picture", "source",
                 "iframe", "input", "button"}
 
@@ -561,6 +563,19 @@ runs:
                 if self.dropping:
                     if tag not in VOID and tag not in ("img", "input", "source", "path"):
                         self.dropping += 1
+                    return
+                if tag == "img":
+                    src = dict(attrs).get("src", "")
+                    # Relative to the document, so it names a file in the
+                    # repository. Anything with a scheme, or protocol-relative,
+                    # lives elsewhere and is dropped as before.
+                    if src and not re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", src) \
+                            and not src.startswith("//"):
+                        path = urljoin(DOC_BASE, src).lstrip("/")
+                        if path not in IMAGES:
+                            IMAGES.append(path)
+                        self.out.append("CONFLUENCEIMAGE%dPLACEHOLDER"
+                                        % IMAGES.index(path))
                     return
                 if tag in DROP:
                     if tag not in ("img", "input", "source", "path"):
@@ -605,8 +620,13 @@ runs:
                 if not self.dropping:
                     self.out.append(html.escape(data, quote=False))
 
-        tag, repo, source, doc_path = sys.argv[1:5]
+        tag, repo, source, doc_path, images_out = sys.argv[1:6]
         BLOB_BASE = "https://github.com/%s/blob/%s/" % (repo, tag)
+        # Image sources are relative to the document, not to the repository
+        # root: README.md next to docs/media/x.gif writes docs/media/x.gif,
+        # while docs/frontend.md writes media/x.gif for the same file.
+        DOC_BASE = "/" + doc_path
+        IMAGES = []
         rendered = open(source, encoding="utf-8").read()
         if not rendered.strip():
             sys.exit("rendered %s is empty — nothing to publish" % doc_path)
@@ -619,6 +639,14 @@ runs:
                 parser.out.append("</%s>" % name)
 
         body = "".join(parser.out)
+        # GitHub's renderer wraps every image in a link to the file it came
+        # from. Resolved against the repository that link is useless here — it
+        # needs the repository access these readers do not have — and Confluence
+        # will not render an ac:image nested in an anchor at all, showing
+        # "Preview unavailable" in its place. The picture is the content; the
+        # wrapper goes.
+        body = re.sub(r'<a href="[^"]*">(CONFLUENCEIMAGE\d+PLACEHOLDER)</a>',
+                      r"\1", body)
         # Dropping a badge image leaves its link wrapper behind as an empty
         # anchor, and a row of badges collapses to a paragraph of line breaks.
         body = re.sub(r'<a href="[^"]*"\s*></a>', "", body)
@@ -632,6 +660,9 @@ runs:
             'Edits made here are overwritten by the next release.</p><hr/>'
             % (html.escape(doc_path), html.escape(repo), html.escape(tag))
         )
+        # One path per line, in placeholder order, for the attach pass.
+        with open(images_out, "w", encoding="utf-8") as fh:
+            fh.write("".join(p + "\n" for p in IMAGES))
         sys.stdout.write(banner + body)
         PYTHON
 
@@ -677,6 +708,29 @@ runs:
                 html = html.replace("<p>%s</p>" % token, image)
                 html = html.replace(token, image)
             open(out_md, "w", encoding="utf-8").write(html)
+        PYTHON
+
+        # The same substitution for the images the document carried, once they
+        # are attachments: one line per placeholder, in order, empty where the
+        # file could not be attached.
+        cat > /tmp/embed_images.py <<'PYTHON'
+        import sys
+
+        src, dest, names_file = sys.argv[1:4]
+        html = open(src, encoding="utf-8").read()
+        names = open(names_file, encoding="utf-8").read().splitlines()
+        for n, name in enumerate(names):
+            token = "CONFLUENCEIMAGE%dPLACEHOLDER" % n
+            if name:
+                image = ('<ac:image ac:align="center">'
+                         '<ri:attachment ri:filename="%s" /></ac:image>' % name)
+            else:
+                # Nothing to point at. The paragraph goes rather than leaving
+                # the token itself on the page.
+                image = ""
+            html = html.replace("<p>%s</p>" % token, image)
+            html = html.replace(token, image)
+        open(dest, "w", encoding="utf-8").write(html)
         PYTHON
 
         # Which files to publish. A `*` must not cross a directory separator —
@@ -750,7 +804,8 @@ runs:
           jq -n --rawfile text /tmp/doc.md --arg ctx "${REPO}" \
             '{text: $text, mode: "gfm", context: $ctx}' > /tmp/doc-request.json
           gh api --method POST /markdown --input /tmp/doc-request.json > /tmp/doc.html
-          python3 /tmp/to_storage.py "${SOURCE_REF}" "${REPO}" /tmp/doc.html "${doc}" > /tmp/doc-storage.html
+          python3 /tmp/to_storage.py "${SOURCE_REF}" "${REPO}" /tmp/doc.html "${doc}" \
+            /tmp/images.txt > /tmp/doc-storage.html
 
           encoded=$(printf '%s' "$title" | jq -sRr @uri)
           found=$(curl --silent --show-error \
@@ -855,6 +910,53 @@ runs:
             cat /tmp/doc-label.json >&2
           fi
 
+          # Images the document carries with it, in the order the sanitiser
+          # numbered its placeholders. Each becomes an attachment on the page,
+          # because a reader without repository access cannot fetch the file
+          # the src pointed at.
+          images=0
+          : > /tmp/image-names.txt
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            # The attachment is named after the whole path: two documents may
+            # each carry a media/diagram.png, and they share one page tree.
+            name="$(printf '%s' "${doc%.md}-${path}" | tr '/' '-')"
+            if ! gh api "repos/${REPO}/contents/${path}?ref=${SOURCE_REF}" --jq '.content' \
+                 2>/dev/null | base64 -d > "/tmp/img-${name}" || [ ! -s "/tmp/img-${name}" ]; then
+              # The alt text stays behind in the body, which is the same thing a
+              # reader would see if the file were missing on GitHub.
+              echo "  no such image in ${SOURCE_REF}: ${path}" >&2
+              rm -f "/tmp/img-${name}"
+              printf '\n' >> /tmp/image-names.txt
+              images=$((images + 1))
+              continue
+            fi
+            att="${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${pageId}/child/attachment"
+            existing=$(curl --silent --show-error --get --url "$att" \
+                --data-urlencode "filename=${name}" \
+                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                --header 'Accept: application/json' | jq -r '.results[0].id // ""')
+            [ -n "$existing" ] && target="${att}/${existing}/data" || target="$att"
+            # The attachment takes the name curl sends, not the one it is
+            # looked up by, so filename= is what makes the two agree — without
+            # it the file lands under the temporary path's name and the
+            # ri:attachment written into the page resolves to nothing.
+            icode=$(curl --silent --show-error --output /tmp/img-response.json \
+                --write-out '%{http_code}' --request POST --url "$target" \
+                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                --header 'X-Atlassian-Token: no-check' \
+                --form "file=@/tmp/img-${name};filename=${name}" --form 'minorEdit=true')
+            if [ "$icode" != "200" ]; then
+              echo "  failed to attach ${path}: HTTP ${icode}" >&2
+              cat /tmp/img-response.json >&2
+              printf '\n' >> /tmp/image-names.txt
+            else
+              echo "  attached ${path} as ${name}"
+              printf '%s\n' "$name" >> /tmp/image-names.txt
+            fi
+            images=$((images + 1))
+          done < /tmp/images.txt
+
           if [ "$diagrams" -gt 0 ]; then
             printf '{"args":["--no-sandbox","--disable-setuid-sandbox"]}' > /tmp/pptr.json
             for n in $(seq 1 "$diagrams"); do
@@ -885,11 +987,23 @@ runs:
               fi
               echo "  drew and attached ${name}"
             done
+          fi
 
-            # The image can only be referenced once the attachment exists, so the
-            # body is published a second time with the placeholders replaced.
-            python3 /tmp/mermaid.py embed /tmp/doc-storage.html /tmp/doc-final.html \
-              /tmp/diagrams "$slug" "$diagrams"
+          # An image can only be referenced once its attachment exists, so a
+          # document carrying either diagrams or images is published a second
+          # time with the placeholders replaced.
+          if [ "$diagrams" -gt 0 ] || [ "$images" -gt 0 ]; then
+            body=/tmp/doc-storage.html
+            if [ "$diagrams" -gt 0 ]; then
+              python3 /tmp/mermaid.py embed "$body" /tmp/doc-mermaid.html \
+                /tmp/diagrams "$slug" "$diagrams"
+              body=/tmp/doc-mermaid.html
+            fi
+            if [ "$images" -gt 0 ]; then
+              python3 /tmp/embed_images.py "$body" /tmp/doc-final.html /tmp/image-names.txt
+            else
+              cp "$body" /tmp/doc-final.html
+            fi
             version=$(curl --silent --show-error \
                 --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
@@ -898,7 +1012,7 @@ runs:
               --rawfile value /tmp/doc-final.html --argjson version "$((version + 1))" \
               '{id: $id, status: "current", title: $title,
                 body: {representation: "storage", value: $value},
-                version: {number: $version, message: "Embedded diagrams"}}')
+                version: {number: $version, message: "Embedded images"}}')
             code=$(curl --silent --show-error --output /tmp/doc-response.json \
                 --write-out '%{http_code}' --request PUT \
                 --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
@@ -906,11 +1020,11 @@ runs:
                 --header 'Accept: application/json' --header 'Content-Type: application/json' \
                 --data "$payload")
             if [ "$code" != "200" ]; then
-              echo "  failed to embed diagrams: HTTP ${code}" >&2
+              echo "  failed to embed images: HTTP ${code}" >&2
               cat /tmp/doc-response.json >&2
               exit 1
             fi
-            echo "  diagrams embedded"
+            echo "  embedded ${diagrams} diagram(s) and ${images} image(s)"
           fi
 
           if [ "${RESTRICT}" == "true" ]; then

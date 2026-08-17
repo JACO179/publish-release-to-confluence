@@ -240,10 +240,16 @@ The Markdown is rendered by GitHub's own `/markdown` endpoint, so tables, fenced
 code and reference links come back correct, and the result is then reduced to the
 XHTML subset Confluence's storage format accepts. Two consequences worth knowing:
 
-- **Images are removed.** Status badges are typically served from endpoints that
-  require repository access, so for readers who have none — the people this page
-  exists for — they would render as broken images. Their surrounding links are
-  dropped with them rather than left behind as empty anchors.
+- **Remote images are removed; images from the repository are kept.** A status
+  badge is served from an endpoint that requires repository access, so for
+  readers who have none — the people this page exists for — it would render
+  broken, and its surrounding link is dropped with it rather than left behind as
+  an empty anchor. An image committed beside the document is a different thing:
+  it is fetched at the published ref, attached to the page, and referenced from
+  there, so screenshots and recordings survive. A `src` is resolved relative to
+  the document, so `README.md` and `docs/frontend.md` can point at the same file
+  by different paths. A file that is not there leaves the alt text behind and
+  says so in the log, rather than failing the publish.
 - **Heading self-links are unwrapped**, since the `#anchor` targets GitHub adds do
   not exist on a Confluence page.
 
@@ -255,8 +261,8 @@ browser rather than in its Markdown API, so a fence would otherwise arrive as a
 code block and stay one — the source of a diagram instead of a diagram. Each
 fence is lifted out before rendering, drawn with `@mermaid-js/mermaid-cli`,
 attached to the page, and referenced with an `<ac:image>`. That needs the page
-to exist first, so a document containing diagrams is published twice: once with
-placeholders, then again with the images in place.
+to exist first, so a document containing diagrams or images is published twice:
+once with placeholders, then again with the pictures in place.
 
 ## Usage
 
