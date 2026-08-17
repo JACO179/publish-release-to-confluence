@@ -937,11 +937,15 @@ runs:
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                 --header 'Accept: application/json' | jq -r '.results[0].id // ""')
             [ -n "$existing" ] && target="${att}/${existing}/data" || target="$att"
+            # The attachment takes the name curl sends, not the one it is
+            # looked up by, so filename= is what makes the two agree — without
+            # it the file lands under the temporary path's name and the
+            # ri:attachment written into the page resolves to nothing.
             icode=$(curl --silent --show-error --output /tmp/img-response.json \
                 --write-out '%{http_code}' --request POST --url "$target" \
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                 --header 'X-Atlassian-Token: no-check' \
-                --form "file=@/tmp/img-${name}" --form 'minorEdit=true')
+                --form "file=@/tmp/img-${name};filename=${name}" --form 'minorEdit=true')
             if [ "$icode" != "200" ]; then
               echo "  failed to attach ${path}: HTTP ${icode}" >&2
               cat /tmp/img-response.json >&2
