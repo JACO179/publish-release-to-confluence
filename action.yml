@@ -772,9 +772,32 @@ runs:
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                 --header 'Accept: application/json' | jq -r '.results[]?.name // empty')
             if printf '%s\n' "$labels" | grep -Fxq "${DOCS_LABEL}"; then
+              echo "  reviving the archived page ${pageId}"
+              # v1, because v2 does not address archived content at all: reading
+              # or updating an archived page there answers 404. There is no
+              # unarchive endpoint either, so the status is set back by hand.
+              aversion=$(curl --silent --show-error \
+                  --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${pageId}?status=archived" \
+                  --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                  --header 'Accept: application/json' | jq -r '.version.number // 0')
+              payload=$(jq -n --arg id "$pageId" --arg title "$title" \
+                --argjson version "$((aversion + 1))" \
+                '{id: $id, type: "page", title: $title, status: "current",
+                  version: {number: $version, message: "Revived from the archive"}}')
+              ucode=$(curl --silent --show-error --output /tmp/doc-unarchive.json \
+                  --write-out '%{http_code}' --request PUT \
+                  --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${pageId}" \
+                  --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                  --header 'Accept: application/json' --header 'Content-Type: application/json' \
+                  --data "$payload")
+              if [ "$ucode" != "200" ]; then
+                echo "  could not bring it out of the archive: HTTP ${ucode}" >&2
+                cat /tmp/doc-unarchive.json >&2
+                echo "  restore or purge page ${pageId} in Confluence, then run again." >&2
+                exit 1
+              fi
               revive=true
               foundParent="${DOCS_PARENT_ID}"
-              echo "  reviving the archived page ${pageId}"
             else
               # Someone else's archived page, which the update below would drag
               # back into the tree under our parent.
