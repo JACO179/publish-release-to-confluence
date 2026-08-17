@@ -196,6 +196,13 @@ written, and whatever is left over is **archived**: out of the page tree and out
 of search, still restorable from *Space settings → Archived pages*. A rename
 therefore archives the old title and creates the new one.
 
+Bring the document back and its page comes back with it. An archived page keeps
+its title but loses its place in the tree, so a plain publish would collide with
+the page it had itself archived; instead the page is revived — same page, same
+id, its history intact — and re-homed under the parent. An archived page that
+carries no label of ours is still refused, because reviving it would drag
+somebody else's page into this tree.
+
 The label is the safety catch. A page written by hand under the same parent, or
 published there by a different repository, carries no such label and is never
 touched. Two consequences follow:
