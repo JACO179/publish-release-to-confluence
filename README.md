@@ -196,12 +196,24 @@ written, and whatever is left over is **archived**: out of the page tree and out
 of search, still restorable from *Space settings → Archived pages*. A rename
 therefore archives the old title and creates the new one.
 
-Bring the document back and its page comes back with it. An archived page keeps
-its title but loses its place in the tree, so a plain publish would collide with
-the page it had itself archived; instead the page is revived — same page, same
-id, its history intact — and re-homed under the parent. An archived page that
-carries no label of ours is still refused, because reviving it would drag
-somebody else's page into this tree.
+**Bringing the document back needs one manual step.** An archived page keeps its
+title, and Confluence titles are unique per space, so the publish cannot create
+a page beside it — and it cannot revive it either: the v2 API answers `404` for
+archived content, v1 answers `403` on the update, and Confluence Cloud has no
+unarchive endpoint. The run therefore stops and tells you which page to deal
+with:
+
+```
+  'srx2fgt/docs/frontend' was archived by an earlier run, and its document is back.
+  Confluence has no API for reviving it. In Space settings ->
+  Archived pages, restore page 3598746852 — it returns with its
+  history — or purge it to publish a fresh page, then run again.
+```
+
+Restoring is one click and keeps the page's history; purging throws it away and
+lets the next run publish a new page under the same title. Either way the next
+run goes green. An archived page carrying no label of ours stops the run too,
+with a message saying so — this action does not touch what it did not publish.
 
 The label is the safety catch. A page written by hand under the same parent, or
 published there by a different repository, carries no such label and is never
