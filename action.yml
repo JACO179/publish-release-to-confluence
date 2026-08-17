@@ -759,6 +759,36 @@ runs:
               --header 'Accept: application/json')
           pageId=$(printf '%s' "$found" | jq -r '.results[0].id // ""')
           foundParent=$(printf '%s' "$found" | jq -r '.results[0].parentId // ""')
+          foundStatus=$(printf '%s' "$found" | jq -r '.results[0].status // ""')
+
+          # A title still resolves to a page after it has been archived, and an
+          # archived page reports no parent, so the check below would refuse a
+          # returning document for colliding with the page this action itself
+          # archived — and blame the wrong thing while doing it.
+          if [ -n "$pageId" ] && [ "$foundStatus" == "archived" ]; then
+            labels=$(curl --silent --show-error \
+                --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}/labels" \
+                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                --header 'Accept: application/json' | jq -r '.results[]?.name // empty')
+            if printf '%s\n' "$labels" | grep -Fxq "${DOCS_LABEL}"; then
+              # This page was archived by an earlier run of this action, and the
+              # document has come back. Confluence will not let it be revived
+              # from here: v2 answers 404 for archived content, v1 answers 403
+              # on the update, and there is no unarchive endpoint to call. One
+              # click in Confluence does what the API will not.
+              echo "  '${title}' was archived by an earlier run, and its document is back." >&2
+              echo "  Confluence has no API for reviving it. In Space settings ->" >&2
+              echo "  Archived pages, restore page ${pageId} — it returns with its" >&2
+              echo "  history — or purge it to publish a fresh page, then run again." >&2
+              exit 1
+            else
+              # Someone else's archived page, which the update below would drag
+              # back into the tree under our parent.
+              echo "  a page titled '${title}' exists at ${pageId} and is archived," >&2
+              echo "  but was not published from ${REPO}. Restore or purge it first." >&2
+              exit 1
+            fi
+          fi
 
           if [ -n "$pageId" ] && [ "$foundParent" != "${DOCS_PARENT_ID}" ]; then
             # Titles are unique per space, so a generic name like "architecture"
