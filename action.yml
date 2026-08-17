@@ -639,6 +639,14 @@ runs:
                 parser.out.append("</%s>" % name)
 
         body = "".join(parser.out)
+        # GitHub's renderer wraps every image in a link to the file it came
+        # from. Resolved against the repository that link is useless here — it
+        # needs the repository access these readers do not have — and Confluence
+        # will not render an ac:image nested in an anchor at all, showing
+        # "Preview unavailable" in its place. The picture is the content; the
+        # wrapper goes.
+        body = re.sub(r'<a href="[^"]*">(CONFLUENCEIMAGE\d+PLACEHOLDER)</a>',
+                      r"\1", body)
         # Dropping a badge image leaves its link wrapper behind as an empty
         # anchor, and a row of badges collapses to a paragraph of line breaks.
         body = re.sub(r'<a href="[^"]*"\s*></a>', "", body)
