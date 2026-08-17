@@ -937,31 +937,48 @@ runs:
         done < /tmp/selected.txt
 
         if [ "${ARCHIVE_REMOVED}" == "true" ]; then
-          # Everything this repository has published under the parent, in one
-          # query rather than a label read per child. Only labelled pages are
-          # candidates, so a page written by hand under the same parent — or by
-          # another repository — is not ours to archive.
-          cql="type=page and parent=${DOCS_PARENT_ID} and label=\"${DOCS_LABEL}\""
-          url="${CONFLUENCE_BASE_URL}/wiki/rest/api/content/search?limit=100&cql=$(printf '%s' "$cql" | jq -sRr @uri)"
-          : > /tmp/existing.txt
+          # The children of the parent, read from the hierarchy rather than from
+          # CQL. A CQL search on the label is one call instead of one per child,
+          # but it answers from the search index: a page created minutes earlier
+          # was repeatedly missing from its results, and a page missing here is
+          # a page that never gets archived. The hierarchy is authoritative and
+          # immediate.
+          url="${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${DOCS_PARENT_ID}/children?limit=250"
+          : > /tmp/children.txt
           searched=true
           while [ -n "$url" ]; do
-            scode=$(curl --silent --show-error --output /tmp/search.json \
+            scode=$(curl --silent --show-error --output /tmp/children.json \
                 --write-out '%{http_code}' --url "$url" \
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                 --header 'Accept: application/json')
             if [ "$scode" != "200" ]; then
-              echo "Could not list the pages labelled ${DOCS_LABEL}: HTTP ${scode}" >&2
-              cat /tmp/search.json >&2
+              echo "Could not list the children of ${DOCS_PARENT_ID}: HTTP ${scode}" >&2
+              cat /tmp/children.json >&2
               searched=false
               break
             fi
-            jq -r '.results[] | "\(.id)\t\(.title)"' /tmp/search.json >> /tmp/existing.txt
+            jq -r '.results[] | "\(.id)\t\(.title)"' /tmp/children.json >> /tmp/children.txt
             # The cursor link comes back rooted at the context path on some
             # instances and beneath it on others; strip it either way.
-            nxt=$(jq -r '._links.next // ""' /tmp/search.json)
+            nxt=$(jq -r '._links.next // ""' /tmp/children.json)
             [ -n "$nxt" ] && url="${CONFLUENCE_BASE_URL}/wiki${nxt#/wiki}" || url=""
           done
+
+          # Of those, the ones this repository published. The label is what
+          # separates them from a page written by hand under the same parent, or
+          # published there by another repository.
+          : > /tmp/existing.txt
+          if [ "$searched" == "true" ]; then
+            while IFS=$'\t' read -r id ctitle; do
+              [ -n "$id" ] || continue
+              labels=$(curl --silent --show-error \
+                  --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${id}/labels?limit=250" \
+                  --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                  --header 'Accept: application/json' | jq -r '.results[]?.name // empty')
+              printf '%s\n' "$labels" | grep -Fxq "${DOCS_LABEL}" \
+                && printf '%s\t%s\n' "$id" "$ctitle" >> /tmp/existing.txt
+            done < /tmp/children.txt
+          fi
 
           if [ "$searched" == "true" ]; then
             : > /tmp/to-archive.txt
