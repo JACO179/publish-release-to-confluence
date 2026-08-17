@@ -152,6 +152,17 @@ inputs:
     required: false
     default: ""
     type: string
+  archiveRemoved:
+    description: >-
+      Archive the page of a document that is no longer there. Publishing labels
+      every page it writes with the repository it came from, and with this set,
+      a labelled page under docsParentId whose document no longer matches
+      docsPaths at the published ref is archived — not deleted, and never a page
+      this action did not publish. Off by default, because a mirror that removes
+      pages should be asked for.
+    required: false
+    default: "false"
+    type: string
 
 runs:
   using: "composite"
@@ -495,6 +506,7 @@ runs:
         DOCS_PATHS: ${{ inputs.docsPaths }}
         DOCS_TITLE_STRIP: ${{ inputs.docsTitleStrip }}
         DOCS_TITLE_PREFIX: ${{ inputs.docsTitlePrefix }}
+        ARCHIVE_REMOVED: ${{ inputs.archiveRemoved }}
         SPACE_ID: ${{ inputs.spaceId }}
         TAG: ${{ inputs.tag }}
         REF: ${{ inputs.ref }}
@@ -708,6 +720,14 @@ runs:
         echo "Publishing under page ${DOCS_PARENT_ID}:"
         sed 's/^/  /' /tmp/selected.txt
 
+        # Which pages belong to this repository. Confluence labels take neither
+        # uppercase nor a slash, so the name is folded; naming the repository
+        # rather than the action lets two repositories share one parent page
+        # without either one archiving the other's pages.
+        DOCS_LABEL="published-from-$(printf '%s' "${REPO}" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-')"
+        DOCS_LABEL="${DOCS_LABEL%-}"
+        : > /tmp/published.txt
+
         while IFS= read -r doc; do
           [ -n "$doc" ] || continue
           # The path, not the basename: a repository of playbooks has a
@@ -788,6 +808,22 @@ runs:
             exit 1
           fi
           echo "  ${action}"
+          printf '%s\n' "$title" >> /tmp/published.txt
+
+          # The label is what makes a page recognisable as this repository's on
+          # a later run. Adding one that is already there is a no-op, so every
+          # publish re-stamps rather than checking first. Labelling is v1: v2
+          # reads labels but does not write them.
+          lcode=$(curl --silent --show-error --output /tmp/doc-label.json \
+              --write-out '%{http_code}' --request POST \
+              --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${pageId}/label" \
+              --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+              --header 'Accept: application/json' --header 'Content-Type: application/json' \
+              --data "$(jq -n --arg name "${DOCS_LABEL}" '[{prefix: "global", name: $name}]')")
+          if [ "$lcode" != "200" ]; then
+            echo "  could not label the page: HTTP ${lcode}" >&2
+            cat /tmp/doc-label.json >&2
+          fi
 
           if [ "$diagrams" -gt 0 ]; then
             printf '{"args":["--no-sandbox","--disable-setuid-sandbox"]}' > /tmp/pptr.json
@@ -869,3 +905,66 @@ runs:
             echo "  editing restricted; reading unchanged"
           fi
         done < /tmp/selected.txt
+
+        if [ "${ARCHIVE_REMOVED}" == "true" ]; then
+          # Everything this repository has published under the parent, in one
+          # query rather than a label read per child. Only labelled pages are
+          # candidates, so a page written by hand under the same parent — or by
+          # another repository — is not ours to archive.
+          cql="type=page and parent=${DOCS_PARENT_ID} and label=\"${DOCS_LABEL}\""
+          url="${CONFLUENCE_BASE_URL}/wiki/rest/api/content/search?limit=100&cql=$(printf '%s' "$cql" | jq -sRr @uri)"
+          : > /tmp/existing.txt
+          searched=true
+          while [ -n "$url" ]; do
+            scode=$(curl --silent --show-error --output /tmp/search.json \
+                --write-out '%{http_code}' --url "$url" \
+                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                --header 'Accept: application/json')
+            if [ "$scode" != "200" ]; then
+              echo "Could not list the pages labelled ${DOCS_LABEL}: HTTP ${scode}" >&2
+              cat /tmp/search.json >&2
+              searched=false
+              break
+            fi
+            jq -r '.results[] | "\(.id)\t\(.title)"' /tmp/search.json >> /tmp/existing.txt
+            # The cursor link comes back rooted at the context path on some
+            # instances and beneath it on others; strip it either way.
+            nxt=$(jq -r '._links.next // ""' /tmp/search.json)
+            [ -n "$nxt" ] && url="${CONFLUENCE_BASE_URL}/wiki${nxt#/wiki}" || url=""
+          done
+
+          if [ "$searched" == "true" ]; then
+            : > /tmp/to-archive.txt
+            while IFS=$'\t' read -r id ptitle; do
+              [ -n "$id" ] || continue
+              grep -Fxq "$ptitle" /tmp/published.txt \
+                || printf '%s\t%s\n' "$id" "$ptitle" >> /tmp/to-archive.txt
+            done < /tmp/existing.txt
+
+            if [ ! -s /tmp/to-archive.txt ]; then
+              echo "Nothing to archive; every page labelled ${DOCS_LABEL} still has its document."
+            else
+              cut -f2 /tmp/to-archive.txt | sed 's/^/  no longer in the repository: /'
+              # The documented body carries the id as a number, so send one where
+              # the id is numeric and fall back to the string it came as.
+              payload=$(cut -f1 /tmp/to-archive.txt | jq -R '{id: (tonumber? // .)}' | jq -s '{pages: .}')
+              # Archiving is v1 and asynchronous: it returns a task rather than
+              # doing the work, and it is the one call here that needs the
+              # space's Archive permission.
+              acode=$(curl --silent --show-error --output /tmp/archive.json \
+                  --write-out '%{http_code}' --request POST \
+                  --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/archive" \
+                  --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                  --header 'Accept: application/json' --header 'Content-Type: application/json' \
+                  --data "$payload")
+              if [ "$acode" != "200" ] && [ "$acode" != "202" ]; then
+                # A stale page is not worth failing a release over; say so and
+                # leave the run green.
+                echo "Could not archive them: HTTP ${acode}" >&2
+                cat /tmp/archive.json >&2
+              else
+                echo "  archiving requested as task $(jq -r '.id // "?"' /tmp/archive.json)"
+              fi
+            fi
+          fi
+        fi

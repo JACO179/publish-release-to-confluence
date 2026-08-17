@@ -95,6 +95,7 @@ The action requires the following inputs:
 | `docsPaths`          | Comma-separated globs selecting which Markdown files to publish.            | False    | `README.md`                       |
 | `docsTitlePrefix`    | Prefix added to every page title, to keep two repositories' pages apart.    | False    | -                                 |
 | `docsTitleStrip`     | Prefix removed from a document's path before it becomes a page title.       | False    | -                                 |
+| `archiveRemoved`     | Archive a published page once its document is gone from the repository.     | False    | `false`                           |
 | `publishReleaseNotes`| Create the release page. False publishes documentation only.                | False    | `true`                            |
 | `ref`                | Git ref the documents are read from. Defaults to `tag`.                    | False    | -                                 |
 
@@ -174,6 +175,40 @@ reach into subdirectories.
 Confluence page titles are unique per space, and names like `architecture` are
 generic enough to already belong to someone else. A page with a matching title
 found under a **different** parent stops the run rather than being overwritten.
+
+### When a document is deleted
+
+The mirror is one-way by default: delete `docs/frontend.md`, or narrow
+`docsPaths` so it no longer matches, and its page stays on Confluence looking
+like a current document. `archiveRemoved: true` closes that gap.
+
+```yaml
+    docsParentId: "123456789"
+    docsPaths: "README.md,docs/*.md"
+    archiveRemoved: "true"
+    githubToken: ${{ github.token }}
+```
+
+Publishing labels every page it writes with the repository the document came
+from — `published-from-<owner>-<repo>`. After the documents are published, the
+pages under `docsParentId` carrying that label are compared against the ones just
+written, and whatever is left over is **archived**: out of the page tree and out
+of search, still restorable from *Space settings → Archived pages*. A rename
+therefore archives the old title and creates the new one.
+
+The label is the safety catch. A page written by hand under the same parent, or
+published there by a different repository, carries no such label and is never
+touched. Two consequences follow:
+
+- Pages published **before** this feature existed have no label until their next
+  publish stamps them, so the first run archives nothing.
+- The account needs the space's **Archive** permission. Without it the run says
+  which pages it could not archive and stays green — a stale page is not worth
+  failing a release over.
+
+Archiving needs the whole set of documents in hand, so it only runs when the
+selection is non-empty; a `docsPaths` that suddenly matches nothing fails the
+step before this point rather than archiving everything.
 
 The Markdown is rendered by GitHub's own `/markdown` endpoint, so tables, fenced
 code and reference links come back correct, and the result is then reduced to the
