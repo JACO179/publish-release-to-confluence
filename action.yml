@@ -163,6 +163,16 @@ inputs:
     required: false
     default: "false"
     type: string
+  fullWidth:
+    description: >-
+      Give every published document page the full-width appearance instead of
+      Confluence's default fixed-width column. Set as page properties
+      (content-appearance-published and -draft) after each page is written,
+      so it survives republishing. Off by default: existing callers keep the
+      appearance they have.
+    required: false
+    default: "false"
+    type: string
 
 runs:
   using: "composite"
@@ -194,12 +204,18 @@ runs:
       if: inputs.publishReleaseNotes == 'true'
       shell: bash
       env:
-        RELEASE_NOTES: ${{ fromJSON(steps.get-release.outputs.result).body }}
-        RELEASE_URL: ${{ fromJSON(steps.get-release.outputs.result).url }}
+        # Raw JSON, parsed in the script below. fromJSON() in an env
+        # expression is evaluated even when the step is skipped, and on a
+        # docs-only run the release output is empty, which printed a
+        # template error into every such run.
+        RELEASE_JSON: ${{ steps.get-release.outputs.result }}
         CONFLUENCE_BASE_URL: ${{ inputs.ConfluenceBaseUrl }}
         CONFLUENCE_EMAIL: ${{ inputs.confluence_email }}
         CONFLUENCE_API_TOKEN: ${{ inputs.confluence_api_token }}
       run: |
+        RELEASE_NOTES=$(jq -r '.body // ""' <<< "${RELEASE_JSON}")
+        RELEASE_URL=$(jq -r '.url // ""' <<< "${RELEASE_JSON}")
+
         # Add additional line before the content
         RELEASE_NOTES="✅ New *${{ inputs.appName }}* Release [${{ inputs.tag }}](${RELEASE_URL}) $(date)\n\n${RELEASE_NOTES}"
 
@@ -507,6 +523,7 @@ runs:
         DOCS_TITLE_STRIP: ${{ inputs.docsTitleStrip }}
         DOCS_TITLE_PREFIX: ${{ inputs.docsTitlePrefix }}
         ARCHIVE_REMOVED: ${{ inputs.archiveRemoved }}
+        FULL_WIDTH: ${{ inputs.fullWidth }}
         SPACE_ID: ${{ inputs.spaceId }}
         TAG: ${{ inputs.tag }}
         REF: ${{ inputs.ref }}
@@ -894,6 +911,43 @@ runs:
           fi
           echo "  ${action}"
           printf '%s\n' "$title" >> /tmp/published.txt
+
+          # Full width is a pair of content properties, not a page field. A
+          # property that already exists must be PUT with its next version;
+          # a missing one is POSTed. Both are idempotent across republishes.
+          if [ "${FULL_WIDTH}" == "true" ]; then
+            for key in content-appearance-published content-appearance-draft; do
+              existing=$(curl --silent --show-error \
+                  --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}/properties?key=${key}" \
+                  --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                  --header 'Accept: application/json' \
+                  | jq -r '.results[0] // empty | "\(.id) \(.version.number)"')
+              if [ -n "$existing" ]; then
+                propId=${existing%% *}; pver=${existing##* }
+                pcode=$(curl --silent --show-error --output /tmp/doc-prop.json \
+                    --write-out '%{http_code}' --request PUT \
+                    --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}/properties/${propId}" \
+                    --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                    --header 'Accept: application/json' --header 'Content-Type: application/json' \
+                    --data "$(jq -n --arg key "$key" --argjson v "$((pver + 1))" \
+                      '{key: $key, value: "full-width", version: {number: $v}}')")
+              else
+                pcode=$(curl --silent --show-error --output /tmp/doc-prop.json \
+                    --write-out '%{http_code}' --request POST \
+                    --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}/properties" \
+                    --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                    --header 'Accept: application/json' --header 'Content-Type: application/json' \
+                    --data "$(jq -n --arg key "$key" '{key: $key, value: "full-width"}')")
+              fi
+              if [ "$pcode" != "200" ]; then
+                echo "  full width (${key}): HTTP ${pcode}" >&2
+                jq -r '.errors[]?.title // .message // .' /tmp/doc-prop.json >&2 \
+                  || cat /tmp/doc-prop.json >&2
+                exit 1
+              fi
+            done
+            echo "  full width"
+          fi
 
           # The label is what makes a page recognisable as this repository's on
           # a later run. Adding one that is already there is a no-op, so every
