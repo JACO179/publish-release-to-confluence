@@ -96,6 +96,7 @@ The action requires the following inputs:
 | `docsTitlePrefix`    | Prefix added to every page title, to keep two repositories' pages apart.    | False    | -                                 |
 | `docsTitleStrip`     | Prefix removed from a document's path before it becomes a page title.       | False    | -                                 |
 | `archiveRemoved`     | Archive a published page once its document is gone from the repository.     | False    | `false`                           |
+| `fullWidth`          | Give published document pages Confluence's full-width appearance.           | False    | `false`                           |
 | `publishReleaseNotes`| Create the release page. False publishes documentation only.                | False    | `true`                            |
 | `ref`                | Git ref the documents are read from. Defaults to `tag`.                    | False    | -                                 |
 
