@@ -253,6 +253,10 @@ XHTML subset Confluence's storage format accepts. Two consequences worth knowing
   says so in the log, rather than failing the publish.
 - **Heading self-links are unwrapped**, since the `#anchor` targets GitHub adds do
   not exist on a Confluence page.
+- **`[[toc]]` on a line of its own becomes Confluence's table of contents
+  macro**, listing the headings from level 2 down. It is the only macro a
+  document can ask for, and the way a long page gets navigation, since a
+  hand-written list of `#anchor` links is unwrapped as above.
 
 The published page opens with a line stating which repository and tag it came
 from, and that edits made in Confluence are overwritten by the next release.
