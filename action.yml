@@ -656,6 +656,17 @@ runs:
                 parser.out.append("</%s>" % name)
 
         body = "".join(parser.out)
+        # A paragraph holding exactly [[toc]] becomes Confluence's own table
+        # of contents macro. It is the one macro a document can ask for: a
+        # hand-written list of #anchors is unwrapped above, because Confluence
+        # derives its own heading ids, so a long generated page had no way to
+        # be navigated. Headings from level 2 down — level 1 is the title.
+        body = body.replace(
+            "<p>[[toc]]</p>",
+            '<ac:structured-macro ac:name="toc" ac:schema-version="1">'
+            '<ac:parameter ac:name="minLevel">2</ac:parameter>'
+            "</ac:structured-macro>",
+        )
         # GitHub's renderer wraps every image in a link to the file it came
         # from. Resolved against the repository that link is useless here — it
         # needs the repository access these readers do not have — and Confluence
