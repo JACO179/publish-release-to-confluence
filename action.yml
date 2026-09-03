@@ -1182,6 +1182,9 @@ runs:
                 || printf '%s\t%s\n' "$id" "$ptitle" >> /tmp/to-archive.txt
             done < /tmp/existing.txt
 
+            # Say what the decision was made from, so "nothing to archive" can
+            # be told apart from "nothing carried the label".
+            echo "$(wc -l < /tmp/children.txt | tr -d ' ') child page(s) under ${DOCS_PARENT_ID}; $(wc -l < /tmp/existing.txt | tr -d ' ') labelled ${DOCS_LABEL}; $(wc -l < /tmp/published.txt | tr -d ' ') published this run"
             if [ ! -s /tmp/to-archive.txt ]; then
               echo "Nothing to archive; every page labelled ${DOCS_LABEL} still has its document."
             else
