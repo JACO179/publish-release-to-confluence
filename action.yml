@@ -268,12 +268,15 @@ runs:
         echo "Payload: $payload"
         # Credentials go through the environment, not the command line: argv is
         # readable by any other process on the runner.
+        # The body goes as a file: a page of any size is one argv string
+        # otherwise, and Linux caps a single argument at 128 KB.
+        printf '%s' "$payload" > /tmp/payload.json
         response=$(curl --request POST \
             --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages" \
             --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
             --header 'Accept: application/json' \
             --header 'Content-Type: application/json' \
-            --data "$payload")
+            --data @/tmp/payload.json)
         echo "Response: $response"
         pageId=$(echo "$response" | jq -r '.id')
 
@@ -493,13 +496,16 @@ runs:
             '{id: $id, status: "current", title: $title,
               body: {representation: "storage", value: $value},
               version: {number: $version, message: "Published checksums"}}')
+          # The body goes as a file: a page of any size is one argv string
+          # otherwise, and Linux caps a single argument at 128 KB.
+          printf '%s' "$payload" > /tmp/payload.json
           code=$(curl --silent --show-error --output /tmp/sums-response.json \
               --write-out '%{http_code}' --request PUT \
               --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${PAGE_ID}" \
               --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
               --header 'Accept: application/json' \
               --header 'Content-Type: application/json' \
-              --data "$payload")
+              --data @/tmp/payload.json)
           if [ "$code" != "200" ]; then
             echo "Failed to publish the checksums: HTTP ${code}" >&2
             cat /tmp/sums-response.json >&2
@@ -892,24 +898,30 @@ runs:
               '{id: $id, status: "current", title: $title,
                 body: {representation: "storage", value: $value},
                 version: {number: $version, message: "Published from the repository"}}')
+            # The body goes as a file: a page of any size is one argv string
+            # otherwise, and Linux caps a single argument at 128 KB.
+            printf '%s' "$payload" > /tmp/payload.json
             code=$(curl --silent --show-error --output /tmp/doc-response.json \
                 --write-out '%{http_code}' --request PUT \
                 --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                 --header 'Accept: application/json' --header 'Content-Type: application/json' \
-                --data "$payload")
+                --data @/tmp/payload.json)
             action="updated to version $((version + 1))"
           else
             payload=$(jq -n --arg spaceId "${SPACE_ID}" --arg title "$title" \
               --arg parentId "${DOCS_PARENT_ID}" --rawfile value /tmp/doc-storage.html \
               '{spaceId: $spaceId, status: "current", title: $title, parentId: $parentId,
                 body: {representation: "storage", value: $value}}')
+            # The body goes as a file: a page of any size is one argv string
+            # otherwise, and Linux caps a single argument at 128 KB.
+            printf '%s' "$payload" > /tmp/payload.json
             code=$(curl --silent --show-error --output /tmp/doc-response.json \
                 --write-out '%{http_code}' --request POST \
                 --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages" \
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                 --header 'Accept: application/json' --header 'Content-Type: application/json' \
-                --data "$payload")
+                --data @/tmp/payload.json)
             pageId=$(jq -r '.id // ""' /tmp/doc-response.json)
             action="created as page ${pageId}"
           fi
@@ -1078,12 +1090,15 @@ runs:
               '{id: $id, status: "current", title: $title,
                 body: {representation: "storage", value: $value},
                 version: {number: $version, message: "Embedded images"}}')
+            # The body goes as a file: a page of any size is one argv string
+            # otherwise, and Linux caps a single argument at 128 KB.
+            printf '%s' "$payload" > /tmp/payload.json
             code=$(curl --silent --show-error --output /tmp/doc-response.json \
                 --write-out '%{http_code}' --request PUT \
                 --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${pageId}" \
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                 --header 'Accept: application/json' --header 'Content-Type: application/json' \
-                --data "$payload")
+                --data @/tmp/payload.json)
             if [ "$code" != "200" ]; then
               echo "  failed to embed images: HTTP ${code}" >&2
               cat /tmp/doc-response.json >&2
@@ -1196,12 +1211,15 @@ runs:
                     body: {representation: "storage", value: .body.storage.value},
                     version: {number: (.version.number + 1),
                               message: "Archived: the document is no longer in the repository"}}')
+                # The body goes as a file: a page of any size is one argv string
+                # otherwise, and Linux caps a single argument at 128 KB.
+                printf '%s' "$payload" > /tmp/payload.json
                 ncode=$(curl --silent --show-error --output /tmp/rename.json \
                     --write-out '%{http_code}' --request PUT \
                     --url "${CONFLUENCE_BASE_URL}/wiki/api/v2/pages/${id}" \
                     --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                     --header 'Accept: application/json' --header 'Content-Type: application/json' \
-                    --data "$payload")
+                    --data @/tmp/payload.json)
                 if [ "$ncode" == "200" ]; then
                   echo "  renamed to '${newtitle}'"
                 else
@@ -1218,12 +1236,15 @@ runs:
               # Archiving is v1 and asynchronous: it returns a task rather than
               # doing the work, and it is the one call here that needs the
               # space's Archive permission.
+              # The body goes as a file: a page of any size is one argv string
+              # otherwise, and Linux caps a single argument at 128 KB.
+              printf '%s' "$payload" > /tmp/payload.json
               acode=$(curl --silent --show-error --output /tmp/archive.json \
                   --write-out '%{http_code}' --request POST \
                   --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/archive" \
                   --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                   --header 'Accept: application/json' --header 'Content-Type: application/json' \
-                  --data "$payload")
+                  --data @/tmp/payload.json)
               if [ "$acode" != "200" ] && [ "$acode" != "202" ]; then
                 # A stale page is not worth failing a release over; say so and
                 # leave the run green.
