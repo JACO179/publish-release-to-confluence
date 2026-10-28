@@ -144,8 +144,11 @@ restriction, on the release page and on every document page:
     additionalEditors: ${{ vars.CONFLUENCE_EDITORS }}   # "712020:…,5b10ac…"
 ```
 
-The value is a comma-separated list of Confluence **account IDs**, the last part
-of a profile URL (`…/wiki/people/<accountId>`). Email addresses are not
+The value is a comma-separated list of Confluence **account IDs**: the path
+segment after `/people/` in a profile URL. That is `…/wiki/people/<accountId>`,
+or, where the profile opens in Atlassian Home,
+`home.atlassian.com/o/<org>/people/<accountId>?cloudId=…`. The organisation and
+cloud IDs in that URL are not account IDs. Email addresses are not
 accepted: Confluence Cloud's API has no supported way to resolve one. Reading
 stays inherited from the space, and they still need the space's own permissions
 to archive or delete. Edits to a page's text are overwritten by the next
