@@ -96,8 +96,10 @@ inputs:
       so they can archive, move or delete one by hand. Applies to the release
       page and to every document page, and only when restrictUpdates is true.
       Restrictions are rewritten on every publish, so removing an ID here takes
-      the right away at the next run. An account ID is the last part of a
-      Confluence profile URL, …/wiki/people/<accountId>.
+      the right away at the next run. An account ID is the path segment after
+      /people/ in a profile URL — …/wiki/people/<accountId>, or
+      home.atlassian.com/o/<org>/people/<accountId>?cloudId=… where the
+      profile opens in Atlassian Home — not the org or cloud ID.
     required: false
     default: ""
     type: string
