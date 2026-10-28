@@ -1159,12 +1159,22 @@ runs:
             restrictions=$(jq -n --arg id "$accountId" \
               '[{operation: "update",
                  restrictions: {user: [{type: "known", accountId: $id}], group: []}}]')
-            rcode=$(curl --silent --show-error --output /tmp/doc-restrict.json \
-                --write-out '%{http_code}' --request PUT \
-                --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${pageId}/restriction" \
-                --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
-                --header 'Accept: application/json' --header 'Content-Type: application/json' \
-                --data "$restrictions")
+            # Right after a page is written, Confluence can answer this call
+            # with a 500 about a content property it has not finished storing
+            # ("EntityNotFoundException ... ContentProperty"). It is their race,
+            # not a bad request, so a 5xx is tried again before the run stops.
+            for attempt in 1 2 3 4; do
+              rcode=$(curl --silent --show-error --output /tmp/doc-restrict.json \
+                  --write-out '%{http_code}' --request PUT \
+                  --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${pageId}/restriction" \
+                  --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
+                  --header 'Accept: application/json' --header 'Content-Type: application/json' \
+                  --data "$restrictions")
+              case "$rcode" in 5??) ;; *) break ;; esac
+              [ "$attempt" -lt 4 ] || break
+              echo "  restricting editing answered HTTP ${rcode}; trying again in $((attempt * 3)) s"
+              sleep $((attempt * 3))
+            done
             if [ "$rcode" != "200" ]; then
               echo "  failed to restrict editing: HTTP ${rcode}" >&2
               cat /tmp/doc-restrict.json >&2
