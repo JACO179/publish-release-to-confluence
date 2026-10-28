@@ -152,6 +152,15 @@ inputs:
     required: false
     default: ""
     type: string
+  docsTitleFromHeading:
+    description: >-
+      Title each page after its document's first "# " heading instead of its
+      path, so docs/01-intro.md with "# 01 Introduction" becomes
+      "01 Introduction". docsTitlePrefix still applies; docsTitleStrip does
+      not. A document without such a heading keeps its path title.
+    required: false
+    default: "false"
+    type: string
   archiveRemoved:
     description: >-
       Archive the page of a document that is no longer there. Publishing labels
@@ -528,6 +537,7 @@ runs:
         DOCS_PATHS: ${{ inputs.docsPaths }}
         DOCS_TITLE_STRIP: ${{ inputs.docsTitleStrip }}
         DOCS_TITLE_PREFIX: ${{ inputs.docsTitlePrefix }}
+        DOCS_TITLE_FROM_HEADING: ${{ inputs.docsTitleFromHeading }}
         ARCHIVE_REMOVED: ${{ inputs.archiveRemoved }}
         FULL_WIDTH: ${{ inputs.fullWidth }}
         SPACE_ID: ${{ inputs.spaceId }}
@@ -843,8 +853,17 @@ runs:
         # The path, not the basename: a repository of playbooks has a
         # README.md in every directory, and they cannot all be called README.
         doc_title() {
-          local title="${1%.md}"
-          if [ -n "${DOCS_TITLE_STRIP}" ]; then
+          local title="${1%.md}" heading=""
+          if [ "${DOCS_TITLE_FROM_HEADING}" == "true" ]; then
+            # The first "# " line outside a code fence, closing #s removed.
+            heading=$(gh api "repos/${REPO}/contents/${1}?ref=${SOURCE_REF}" --jq '.content' \
+              | base64 -d | awk '{ sub(/\r$/, "") }
+                /^(```|~~~)/ { fence = !fence; next }
+                !fence && /^# / { sub(/^# +/, ""); sub(/ +#+ *$/, ""); print; exit }')
+          fi
+          if [ -n "$heading" ]; then
+            title="$heading"
+          elif [ -n "${DOCS_TITLE_STRIP}" ]; then
             title="${title#${DOCS_TITLE_STRIP}}"
           fi
           printf '%s' "${DOCS_TITLE_PREFIX}${title}"
@@ -857,6 +876,14 @@ runs:
           [ -n "$doc" ] || continue
           printf '%s\t%s\n' "$doc" "$(doc_title "$doc")" >> /tmp/doc-titles.tsv
         done < /tmp/selected.txt
+        # Two documents with one title would overwrite each other's page; with
+        # titles taken from headings that is one copied heading away.
+        dupes=$(cut -f2 /tmp/doc-titles.tsv | sort | uniq -d)
+        if [ -n "$dupes" ]; then
+          echo "More than one document would be published as:" >&2
+          printf '%s\n' "$dupes" | sed 's/^/  /' >&2
+          exit 1
+        fi
 
         # Which pages belong to this repository. Confluence labels take neither
         # uppercase nor a slash, so the name is folded; naming the repository
@@ -868,15 +895,16 @@ runs:
 
         while IFS= read -r doc; do
           [ -n "$doc" ] || continue
-          title=$(doc_title "$doc")
+          title=$(awk -F'\t' -v d="$doc" '$1 == d { print $2; exit }' /tmp/doc-titles.tsv)
           echo "--- ${doc} -> '${title}'"
 
           gh api "repos/${REPO}/contents/${doc}?ref=${SOURCE_REF}" --jq '.content' \
             | base64 -d > /tmp/doc-raw.md
           rm -rf /tmp/diagrams && mkdir -p /tmp/diagrams
-          # A title may hold a path separator now, and it names files on disk
-          # and attachments in Confluence — neither of which takes a slash.
-          slug=$(printf '%s' "$title" | tr '/' '-')
+          # A title may hold a path separator, or the spaces and punctuation of
+          # a heading, and it names files on disk and attachments in Confluence.
+          # A path title comes out as before: only its slashes change.
+          slug=$(printf '%s' "$title" | tr -c 'A-Za-z0-9._-' '-')
           diagrams=$(python3 /tmp/mermaid.py extract /tmp/doc-raw.md /tmp/doc.md /tmp/diagrams "$slug")
           [ "$diagrams" -gt 0 ] && echo "  ${diagrams} mermaid diagram(s)"
           jq -n --rawfile text /tmp/doc.md --arg ctx "${REPO}" \

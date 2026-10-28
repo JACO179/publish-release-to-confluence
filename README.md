@@ -95,6 +95,7 @@ The action requires the following inputs:
 | `docsPaths`          | Comma-separated globs selecting which Markdown files to publish.            | False    | `README.md`                       |
 | `docsTitlePrefix`    | Prefix added to every page title, to keep two repositories' pages apart.    | False    | -                                 |
 | `docsTitleStrip`     | Prefix removed from a document's path before it becomes a page title.       | False    | -                                 |
+| `docsTitleFromHeading` | Title each page after its document's first `# ` heading instead of its path. | False | `false` |
 | `archiveRemoved`     | Archive a published page once its document is gone from the repository.     | False    | `false`                           |
 | `fullWidth`          | Give published document pages Confluence's full-width appearance.           | False    | `false`                           |
 | `publishReleaseNotes`| Create the release page. False publishes documentation only.                | False    | `true`                            |
@@ -149,6 +150,14 @@ carrying a directory nobody needs to read.
 `docsTitlePrefix` does the opposite, and for the opposite reason: titles are
 unique per Confluence space, so two repositories both publishing a `README`
 collide. A prefix of `myapp/` gives `myapp/README` beside another project's.
+
+`docsTitleFromHeading: "true"` names each page after its document's first `# `
+heading, so `docs/01-intro.md` beginning with `# 01 Introduction` becomes
+`01 Introduction`. `docsTitlePrefix` still applies; `docsTitleStrip` has nothing
+left to strip. A document without such a heading keeps its path title. Headings
+are easy to copy, so the run stops before writing anything if two documents
+would share a title — but only within one run: two runs into the same space,
+such as one per language, must still keep their headings apart.
 
 ### Publishing documentation without a release
 
