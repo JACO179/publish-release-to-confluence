@@ -89,6 +89,18 @@ inputs:
     required: false
     default: "false"
     type: string
+  additionalEditors:
+    description: >-
+      Comma-separated Confluence account IDs who may edit restricted pages
+      alongside the publishing account — the people responsible for the pages,
+      so they can archive, move or delete one by hand. Applies to the release
+      page and to every document page, and only when restrictUpdates is true.
+      Restrictions are rewritten on every publish, so removing an ID here takes
+      the right away at the next run. An account ID is the last part of a
+      Confluence profile URL, …/wiki/people/<accountId>.
+    required: false
+    default: ""
+    type: string
   # Checksums shown as text
   checksumFile:
     description: >-
@@ -212,6 +224,7 @@ runs:
         CONFLUENCE_BASE_URL: ${{ inputs.ConfluenceBaseUrl }}
         CONFLUENCE_EMAIL: ${{ inputs.confluence_email }}
         CONFLUENCE_API_TOKEN: ${{ inputs.confluence_api_token }}
+        ADDITIONAL_EDITORS: ${{ inputs.additionalEditors }}
       run: |
         RELEASE_NOTES=$(jq -r '.body // ""' <<< "${RELEASE_JSON}")
         RELEASE_URL=$(jq -r '.url // ""' <<< "${RELEASE_JSON}")
@@ -348,10 +361,13 @@ runs:
             exit 1
           fi
           # PUT replaces the restrictions wholesale, so republishing a tag
-          # re-asserts them rather than stacking duplicates.
-          restrictions=$(jq -n --arg id "$accountId" \
-            '[{operation: "update",
-               restrictions: {user: [{type: "known", accountId: $id}], group: []}}]')
+          # re-asserts them rather than stacking duplicates — and drops anyone
+          # no longer listed in additionalEditors.
+          restrictions=$(jq -n --arg id "$accountId" --arg extra "${ADDITIONAL_EDITORS}" \
+            '[$id] + ($extra | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != "")))
+             | unique
+             | [{operation: "update",
+                 restrictions: {user: map({type: "known", accountId: .}), group: []}}]')
           code=$(curl --silent --show-error --output /tmp/restrict-response.json \
               --write-out '%{http_code}' --request PUT \
               --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/content/${pageId}/restriction" \
@@ -364,7 +380,9 @@ runs:
             cat /tmp/restrict-response.json >&2
             exit 1
           fi
-          echo "Editing restricted to the publishing account; reading unchanged."
+          echo "Editing restricted to the publishing account and $(( $(jq '.[0].restrictions.user | length' <<< "$restrictions") - 1 )) additional editor(s); reading unchanged."
+        elif [ -n "${ADDITIONAL_EDITORS}" ]; then
+          echo "additionalEditors is set but restrictUpdates is not; nothing is restricted, so it has no effect."
         fi
 
     # Release notes tell people what changed; the assets let them actually have
@@ -383,6 +401,7 @@ runs:
         CONFLUENCE_BASE_URL: ${{ inputs.ConfluenceBaseUrl }}
         CONFLUENCE_EMAIL: ${{ inputs.confluence_email }}
         CONFLUENCE_API_TOKEN: ${{ inputs.confluence_api_token }}
+        ADDITIONAL_EDITORS: ${{ inputs.additionalEditors }}
       run: |
         if [ -z "${GH_TOKEN}" ]; then
           echo "attachAssets is true but githubToken is empty — pass \${{ github.token }}." >&2
@@ -539,6 +558,7 @@ runs:
         CONFLUENCE_BASE_URL: ${{ inputs.ConfluenceBaseUrl }}
         CONFLUENCE_EMAIL: ${{ inputs.confluence_email }}
         CONFLUENCE_API_TOKEN: ${{ inputs.confluence_api_token }}
+        ADDITIONAL_EDITORS: ${{ inputs.additionalEditors }}
       run: |
         if [ -z "${GH_TOKEN}" ]; then
           echo "docsParentId is set but githubToken is empty — pass github.token." >&2
@@ -839,6 +859,9 @@ runs:
         fi
         echo "Publishing under page ${DOCS_PARENT_ID}:"
         sed 's/^/  /' /tmp/selected.txt
+        if [ "${RESTRICT}" != "true" ] && [ -n "${ADDITIONAL_EDITORS}" ]; then
+          echo "additionalEditors is set but restrictUpdates is not; nothing is restricted, so it has no effect."
+        fi
 
         # The path, not the basename: a repository of playbooks has a
         # README.md in every directory, and they cannot all be called README.
@@ -1156,9 +1179,13 @@ runs:
                 --url "${CONFLUENCE_BASE_URL}/wiki/rest/api/user/current" \
                 --user "${CONFLUENCE_EMAIL}:${CONFLUENCE_API_TOKEN}" \
                 --header 'Accept: application/json' | jq -r '.accountId')
-            restrictions=$(jq -n --arg id "$accountId" \
-              '[{operation: "update",
-                 restrictions: {user: [{type: "known", accountId: $id}], group: []}}]')
+            # The publishing account plus additionalEditors, each once. An ID
+            # Confluence does not know fails the call below with its answer.
+            restrictions=$(jq -n --arg id "$accountId" --arg extra "${ADDITIONAL_EDITORS}" \
+              '[$id] + ($extra | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != "")))
+               | unique
+               | [{operation: "update",
+                   restrictions: {user: map({type: "known", accountId: .}), group: []}}]')
             # Right after a page is written, Confluence can answer this call
             # with a 500 about a content property it has not finished storing
             # ("EntityNotFoundException ... ContentProperty"). It is their race,
@@ -1180,7 +1207,7 @@ runs:
               cat /tmp/doc-restrict.json >&2
               exit 1
             fi
-            echo "  editing restricted; reading unchanged"
+            echo "  editing restricted to the publishing account and $(( $(jq '.[0].restrictions.user | length' <<< "$restrictions") - 1 )) additional editor(s); reading unchanged"
           fi
         done < /tmp/selected.txt
 

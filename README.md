@@ -90,6 +90,7 @@ The action requires the following inputs:
 | `assetPattern`       | Glob selecting which assets to attach (`gh release download --pattern`).    | False    | `*`                               |
 | `githubToken`        | Token used to download assets and read the documents. Required when `attachAssets` is true or `docsParentId` is set. | False | - |
 | `restrictUpdates`    | Restrict editing of created pages to the publishing account; reading unchanged. | False | `false`                       |
+| `additionalEditors`  | Comma-separated Confluence account IDs who may edit restricted pages too.   | False    | -                                 |
 | `checksumFile`       | Checksum file whose contents are shown as text on the release page.         | False    | `SHA256SUMS`                      |
 | `docsParentId`       | Parent page under which each matched Markdown file becomes a child page.    | False    | -                                 |
 | `docsPaths`          | Comma-separated globs selecting which Markdown files to publish.            | False    | `README.md`                       |
@@ -127,6 +128,35 @@ Notes:
 - The action creates a **new page per release**, so attachments live on that
   release's page and the download link changes each time. If you need a link that
   does not move, point readers at the parent page.
+
+### Who may edit the pages
+
+`restrictUpdates: true` leaves only the publishing account able to edit what it
+publishes. Usually that is a technical user nobody logs in as, so nobody can
+archive, move or delete a stale page by hand either: Confluence grants those
+rights on a restricted page only to whoever may edit it.
+
+`additionalEditors` adds the people responsible for the pages to that
+restriction, on the release page and on every document page:
+
+```yaml
+    restrictUpdates: "true"
+    additionalEditors: ${{ vars.CONFLUENCE_EDITORS }}   # "712020:…,5b10ac…"
+```
+
+The value is a comma-separated list of Confluence **account IDs**, the last part
+of a profile URL (`…/wiki/people/<accountId>`). Email addresses are not
+accepted: Confluence Cloud's API has no supported way to resolve one. Reading
+stays inherited from the space, and they still need the space's own permissions
+to archive or delete. Edits to a page's text are overwritten by the next
+publish all the same; this is for looking after the page tree, not for writing
+in Confluence.
+
+The restriction is rewritten on every publish, so an ID removed from the list
+loses the right at the next run. An ID Confluence does not know fails the run
+with Confluence's answer, rather than leaving that person quietly without
+access. Without `restrictUpdates` nothing is restricted and the list has no
+effect.
 
 ### Mirroring the documentation
 
