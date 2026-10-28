@@ -177,6 +177,23 @@ Confluence page titles are unique per space, and names like `architecture` are
 generic enough to already belong to someone else. A page with a matching title
 found under a **different** parent stops the run rather than being overwritten.
 
+### Links between documents
+
+A relative link is read the way GitHub reads it: from the document's own
+folder, so `../README.md` in `docs/frontend.md` means the root `README.md`, and
+a link to a folder means the `README.md` inside it.
+
+**A link to another document of the same run becomes a link to its page.**
+`[setup](setup.md)` in a document published beside `setup.md` opens the
+`setup` page in Confluence, not the file on GitHub, which the people reading
+there may have no access to. The link names the page by title, so it works
+even when the page it points to is created later in the same run. A
+`#fragment` is dropped, for the same reason heading self-links are: GitHub's
+anchors do not exist on a Confluence page.
+
+Every other relative link — a file that is not published, or one published by
+a different run — still goes to the file on GitHub at the published ref.
+
 ### When a document is deleted
 
 The mirror is one-way by default: delete `docs/frontend.md`, or narrow

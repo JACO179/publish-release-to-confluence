@@ -558,7 +558,7 @@ runs:
         # reads its program from stdin, so a heredoc there leaves sys.stdin
         # empty — which once published a page containing only its banner.
         cat > /tmp/to_storage.py <<'PYTHON'
-        import html, re, sys
+        import html, posixpath, re, sys
         from html.parser import HTMLParser
         from urllib.parse import urljoin
 
@@ -576,6 +576,14 @@ runs:
         # attachable, so it is kept and dealt with below.
         DROP = {"img", "svg", "path", "script", "style", "picture", "source",
                 "iframe", "input", "button"}
+
+        # A stack entry says how its element is closed: True for the tag it
+        # opened as, a string for one rewritten into something else (a link
+        # to a published page), False for one that was unwrapped.
+        def closer(tag, emitted):
+            if emitted is True:
+                return "</%s>" % tag
+            return emitted or ""
 
         class ToStorage(HTMLParser):
             def __init__(self):
@@ -619,7 +627,24 @@ runs:
                         return
                     if not re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*:", href) \
                             and not href.startswith("//"):
-                        href = urljoin(BLOB_BASE, href)
+                        # Relative to the document, as GitHub reads it: from
+                        # docs/a.md, b.md is docs/b.md and ../README.md is the
+                        # root README. A folder link means its README.
+                        raw = re.split(r"[?#]", href, maxsplit=1)[0]
+                        path = posixpath.normpath(
+                            posixpath.join(posixpath.dirname(doc_path), raw))
+                        page = TITLES.get(path) or TITLES.get(
+                            posixpath.join(path, "README.md"))
+                        if page:
+                            # Published in this run: link the page, not the
+                            # repository, which these readers may not be able
+                            # to open. The #fragment goes, as above.
+                            self.out.append(
+                                '<ac:link><ri:page ri:content-title="%s"/>'
+                                "<ac:link-body>" % html.escape(page, quote=True))
+                            self.stack.append((tag, "</ac:link-body></ac:link>"))
+                            return
+                        href = urljoin(BLOB_BASE, path) + href[len(raw):]
                     self.out.append('<a href="%s">' % html.escape(href, quote=True))
                     self.stack.append((tag, True))
                     return
@@ -634,8 +659,7 @@ runs:
                     return
                 for i in range(len(self.stack) - 1, -1, -1):
                     if self.stack[i][0] == tag:
-                        if self.stack[i][1]:
-                            self.out.append("</%s>" % tag)
+                        self.out.append(closer(*self.stack[i]))
                         del self.stack[i:]
                         return
 
@@ -643,8 +667,12 @@ runs:
                 if not self.dropping:
                     self.out.append(html.escape(data, quote=False))
 
-        tag, repo, source, doc_path, images_out = sys.argv[1:6]
+        tag, repo, source, doc_path, images_out, titles_in = sys.argv[1:7]
         BLOB_BASE = "https://github.com/%s/blob/%s/" % (repo, tag)
+        # path<TAB>title of every document this run publishes.
+        TITLES = dict(line.split("\t", 1)
+                      for line in open(titles_in, encoding="utf-8").read().splitlines()
+                      if "\t" in line)
         # Image sources are relative to the document, not to the repository
         # root: README.md next to docs/media/x.gif writes docs/media/x.gif,
         # while docs/frontend.md writes media/x.gif for the same file.
@@ -657,9 +685,8 @@ runs:
         parser = ToStorage()
         parser.feed(rendered)
         parser.close()
-        for name, emitted in reversed(parser.stack):
-            if emitted:
-                parser.out.append("</%s>" % name)
+        for entry in reversed(parser.stack):
+            parser.out.append(closer(*entry))
 
         body = "".join(parser.out)
         # A paragraph holding exactly [[toc]] becomes Confluence's own table
@@ -681,9 +708,14 @@ runs:
         # wrapper goes.
         body = re.sub(r'<a href="[^"]*">(CONFLUENCEIMAGE\d+PLACEHOLDER)</a>',
                       r"\1", body)
+        body = re.sub(r'<ac:link><ri:page ri:content-title="[^"]*"/><ac:link-body>'
+                      r"(CONFLUENCEIMAGE\d+PLACEHOLDER)</ac:link-body></ac:link>",
+                      r"\1", body)
         # Dropping a badge image leaves its link wrapper behind as an empty
         # anchor, and a row of badges collapses to a paragraph of line breaks.
         body = re.sub(r'<a href="[^"]*"\s*></a>', "", body)
+        body = re.sub(r'<ac:link><ri:page ri:content-title="[^"]*"/>'
+                      r"<ac:link-body>\s*</ac:link-body></ac:link>", "", body)
         body = re.sub(r"(?:<br/>\s*){2,}", "<br/>", body)
         body = re.sub(r"<p>(?:\s|<br/>)*</p>", "", body)
         if not body.strip():
@@ -808,6 +840,24 @@ runs:
         echo "Publishing under page ${DOCS_PARENT_ID}:"
         sed 's/^/  /' /tmp/selected.txt
 
+        # The path, not the basename: a repository of playbooks has a
+        # README.md in every directory, and they cannot all be called README.
+        doc_title() {
+          local title="${1%.md}"
+          if [ -n "${DOCS_TITLE_STRIP}" ]; then
+            title="${title#${DOCS_TITLE_STRIP}}"
+          fi
+          printf '%s' "${DOCS_TITLE_PREFIX}${title}"
+        }
+        # Every document's title is known before the first one is rendered, so
+        # a link from one published document to another can name the page it
+        # will land on — including one this run has not written yet.
+        : > /tmp/doc-titles.tsv
+        while IFS= read -r doc; do
+          [ -n "$doc" ] || continue
+          printf '%s\t%s\n' "$doc" "$(doc_title "$doc")" >> /tmp/doc-titles.tsv
+        done < /tmp/selected.txt
+
         # Which pages belong to this repository. Confluence labels take neither
         # uppercase nor a slash, so the name is folded; naming the repository
         # rather than the action lets two repositories share one parent page
@@ -818,13 +868,7 @@ runs:
 
         while IFS= read -r doc; do
           [ -n "$doc" ] || continue
-          # The path, not the basename: a repository of playbooks has a
-          # README.md in every directory, and they cannot all be called README.
-          title="${doc%.md}"
-          if [ -n "${DOCS_TITLE_STRIP}" ]; then
-            title="${title#${DOCS_TITLE_STRIP}}"
-          fi
-          title="${DOCS_TITLE_PREFIX}${title}"
+          title=$(doc_title "$doc")
           echo "--- ${doc} -> '${title}'"
 
           gh api "repos/${REPO}/contents/${doc}?ref=${SOURCE_REF}" --jq '.content' \
@@ -839,7 +883,7 @@ runs:
             '{text: $text, mode: "gfm", context: $ctx}' > /tmp/doc-request.json
           gh api --method POST /markdown --input /tmp/doc-request.json > /tmp/doc.html
           python3 /tmp/to_storage.py "${SOURCE_REF}" "${REPO}" /tmp/doc.html "${doc}" \
-            /tmp/images.txt > /tmp/doc-storage.html
+            /tmp/images.txt /tmp/doc-titles.tsv > /tmp/doc-storage.html
 
           encoded=$(printf '%s' "$title" | jq -sRr @uri)
           found=$(curl --silent --show-error \
